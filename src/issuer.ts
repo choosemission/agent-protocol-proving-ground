@@ -1,5 +1,5 @@
 /**
- * The Lab test issuer, shared by every door. It gives a run an SD-JWT VC
+ * The Lab test issuer, shared by every door: the Lab's did:webvh, signing with its #issuer key. It gives a run an SD-JWT VC
  * (dc+sd-jwt) attesting the run's handle, bound to the holder key the caller
  * sends. The handle is selectively disclosable.
  *
@@ -8,7 +8,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { SignJWT, type JWK } from 'jose';
-import { BASE_URL, ISSUER_ID, issuer } from './lab.ts';
+import { BASE_URL, DID, issuer } from './lab.ts';
 
 export const VCT = `${BASE_URL}/pg/vct/handle`;
 
@@ -23,7 +23,7 @@ export async function issueCredential(holder: JWK, handle: string) {
   const { kty, crv, x, y } = holder;
   const disclosure = Buffer.from(JSON.stringify([randomBytes(16).toString('base64url'), 'handle', handle])).toString('base64url');
   const jwt = await new SignJWT({
-    iss: ISSUER_ID,
+    iss: DID,
     vct: VCT,
     cnf: { jwk: { kty, crv, x, y } },
     _sd: [digest(disclosure)],
@@ -36,5 +36,3 @@ export async function issueCredential(holder: JWK, handle: string) {
   return `${jwt}~${disclosure}~`;
 }
 
-/** SD-JWT VC issuer metadata, so other verifiers can check our credentials too. */
-export const issuerMetadata = { issuer: ISSUER_ID, jwks: { keys: [issuer.jwk] } };

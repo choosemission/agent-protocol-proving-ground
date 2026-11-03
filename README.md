@@ -17,7 +17,7 @@ Needs Node 22.18 or later. It runs the TypeScript directly, with no build step.
 
 ```sh
 npm install
-npm start                 # http://localhost:8401, each door's wall is at /<door>
+npm start                 # http://pg.localhost:8401, each door's wall is at /<door>
 npm test                  # end to end: every place an attempt can stop (needs openssl)
 npm run typecheck
 ```
@@ -25,8 +25,8 @@ npm run typecheck
 | Variable | Default | |
 | --- | --- | --- |
 | `PORT` | `8401` | |
-| `BASE_URL` | `http://localhost:$PORT` | Public URL. Sets the verifier's `did:web`, the issuer ID and every link |
-| `DATA_DIR` | `./data` | SQLite database and the two signing keys, made on first start |
+| `BASE_URL` | `http://pg.localhost:$PORT` | Public URL. Sets the verifier's `did:webvh`, the issuer ID and every link. Must be a domain name (did:webvh refuses bare `localhost`; `*.localhost` resolves to this machine) |
+| `DATA_DIR` | `./data` | SQLite database, the signing keys and the DID log (`did.jsonl`), made on first start. Keep it on a persistent volume: it *is* the DID. A new host needs an empty one, and gets a new DID |
 
 ## For agents
 
@@ -42,8 +42,8 @@ to `/llms.txt` (and, on the anonymous URL, says how to start a run).
 A run is one handle, with a row on every door's wall.
 
 ```sh
-curl -X POST localhost:8401/pg/runs -H 'content-type: application/json' -d '{"handle":"relaybox"}'
-# → {"handle": "relaybox", "run": "<run>", "doors": {"x401": "http://localhost:8401/pg/doors/x401/r/<run>"}, ...}
+curl -X POST pg.localhost:8401/pg/runs -H 'content-type: application/json' -d '{"handle":"relaybox"}'
+# → {"handle": "relaybox", "run": "<run>", "doors": {"x401": "http://pg.localhost:8401/pg/doors/x401/r/<run>"}, ...}
 ```
 
 Point an agent at a door URL. Anyone can also call a door without a run at
@@ -56,14 +56,15 @@ the wall, and a leaked one means starting a new run.
 The Lab test issuer, shared by every door, attests the run's handle:
 
 ```sh
-curl -X POST localhost:8401/pg/issuer/credential -H 'content-type: application/json' \
+curl -X POST pg.localhost:8401/pg/issuer/credential -H 'content-type: application/json' \
   -d '{"jwk": <holder public JWK>, "run": "<run>"}'
-# → {"format": "dc+sd-jwt", "credential": "<sd-jwt>", "issuer": "<BASE_URL>/pg/issuer"}
+# → {"format": "dc+sd-jwt", "credential": "<sd-jwt>", "issuer": "did:webvh:<scid>:<host>"}
 ```
 
 An SD-JWT VC of vct `<BASE_URL>/pg/vct/handle`, bound to the holder key
-(`cnf.jwk`), with one selectively disclosable claim, `handle`. Issuer
-metadata is at `/.well-known/jwt-vc-issuer/pg/issuer`. A door that asks for
+(`cnf.jwk`), with one selectively disclosable claim, `handle`. The issuer
+is the Lab's did:webvh (the same DID the doors verify as), signing with its
+`#issuer` key; resolve it from `/.well-known/did.jsonl`. A door that asks for
 it on a run's URL checks the disclosed handle is that run's.
 
 ## What is stored
@@ -80,7 +81,7 @@ handles, never run IDs.
 | [`src/doors/`](src/doors) | One door per protocol: its challenge, ladder of checks and receipt, and its docs |
 | [`src/issuer.ts`](src/issuer.ts) | The Lab test issuer: the handle credential |
 | [`src/store.ts`](src/store.ts) | Runs and attempts in SQLite (`node:sqlite`), and the change bus |
-| [`src/lab.ts`](src/lab.ts) | Base URL, `did:web`, signing keys |
+| [`src/lab.ts`](src/lab.ts) | Base URL, `did:webvh` (served at `/.well-known/did.jsonl`, with a parallel `did:web`), signing keys |
 | [`src/server.ts`](src/server.ts) | Routes, the door registry, CORS, SSE |
 | [`public/index.html`](public/index.html) | The homepage: every door, with its attempts and who got through first |
 | [`public/door.html`](public/door.html) | A door's wall, at `/<door>`: runs, live feed, funnel, stop codes, attempt timelines |

@@ -6,7 +6,8 @@
  *   node client.ts <run's x401 door URL> [--unsigned]
  *
  * 1. GET the door and decode PROOF-REQUEST.
- * 2. Take the signed entry and check its JAR against the door's did:web key
+ * 2. Take the signed entry, resolve the door's did:webvh (checking its whole log)
+ *    and check the JAR against the key it names
  *    (or, with --unsigned, the unsigned entry).
  * 3. Get the run's handle credential from the Lab issuer, using the run ID in
  *    the door URL. A real wallet already holds one.
@@ -16,7 +17,8 @@
  */
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { SignJWT, decodeJwt, exportJWK, generateKeyPair, importJWK, jwtVerify, type JWTPayload } from 'jose';
+import { SignJWT, decodeJwt, decodeProtectedHeader, exportJWK, generateKeyPair, importJWK, jwtVerify, type JWK, type JWTPayload } from 'jose';
+import { defaultVerifier, resolveDIDFromLog } from 'didwebvh-ts';
 
 export const decode = (header: string) => JSON.parse(Buffer.from(header, 'base64url').toString('utf8'));
 export const encode = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
@@ -43,11 +45,19 @@ export async function challenge(doorUrl: string) {
   const payload = decode(header);
   const entry = (protocol: string) => payload.credential_requirements.digital.requests.find((r: { protocol: string }) => r.protocol === protocol);
   const jar: string = entry('openid4vp-v1-signed').data.request;
-  // client_id is decentralized_identifier:did:web:<host>; resolve it and check the JAR signature.
-  const host = decodeURIComponent(String(decodeJwt(jar).client_id).replace(/^decentralized_identifier:did:web:/, ''));
-  const scheme = /^(localhost|127\.0\.0\.1)(:|$)/.test(host) ? 'http' : 'https';
-  const did = await (await fetch(`${scheme}://${host}/.well-known/did.json`)).json();
-  const { payload: signed } = await jwtVerify(jar, await importJWK(did.verificationMethod[0].publicKeyJwk, 'ES256'), { typ: 'oauth-authz-req+jwt' });
+  // client_id is decentralized_identifier:did:webvh:<scid>:<host>; fetch its log, verify it, check the JAR with the key it names.
+  const did = String(decodeJwt(jar).client_id).replace(/^decentralized_identifier:/, '');
+  const [method, , host, ...path] = did.split(':').slice(1);
+  if (method !== 'webvh' || !host) throw new Error(`expected a did:webvh client_id, got ${did}`);
+  const scheme = /(^|\.)localhost(:|$)/.test(decodeURIComponent(host)) ? 'http' : 'https';
+  const url = `${scheme}://${decodeURIComponent(host)}/${path.length ? path.map(decodeURIComponent).join('/') : '.well-known'}/did.jsonl`;
+  const log = (await (await fetch(url)).text()).trim().split('\n').map((l) => JSON.parse(l));
+  const { didDocument } = await resolveDIDFromLog(log, { verifier: defaultVerifier });
+  if (didDocument?.id !== did) throw new Error(`${url} does not resolve to ${did}`);
+  const { kid } = decodeProtectedHeader(jar);
+  const vm = didDocument.verificationMethod?.find((v) => v.id === kid);
+  if (!vm?.publicKeyJwk) throw new Error(`${did} has no key ${kid}`);
+  const { payload: signed } = await jwtVerify(jar, await importJWK(vm.publicKeyJwk as JWK, 'ES256'), { typ: 'oauth-authz-req+jwt' });
   return { payload, signed: signed as OpenID4VPRequest, unsigned: entry('openid4vp-v1-unsigned').data as OpenID4VPRequest };
 }
 

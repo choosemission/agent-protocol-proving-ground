@@ -12,13 +12,13 @@
  *   GET      /pg/state, /pg/events       the wall's data, and a ping on every change (SSE)
  *   GET      /pg/attempts/<id>           one attempt's timeline
  *   GET      /pg/jwks.json               verifier and issuer keys (verify receipts here)
- *   GET      /.well-known/did.json       the verifier's did:web (every door's client_id)
- *   GET      /.well-known/jwt-vc-issuer/pg/issuer   SD-JWT VC issuer metadata
+ *   GET      /.well-known/did.jsonl      the verifier's did:webvh log (every door's client_id)
+ *   GET      /.well-known/did.json       the same DID as a parallel did:web
  */
 import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { BASE_URL, PORT, didDocument, issuer, verifier } from './lab.ts';
-import { issueCredential, issuerMetadata } from './issuer.ts';
+import { BASE_URL, DID, PORT, didLogText, didWebDocument, issuer, verifier } from './lab.ts';
+import { issueCredential } from './issuer.ts';
 import * as store from './store.ts';
 import * as x401 from './doors/x401.ts';
 
@@ -69,10 +69,10 @@ and one URL per door. The run ID labels your attempts; don't publish it.
 POST {"jwk": <your holder public JWK, EC or OKP, no "d">, "run": "<run ID>"} to ${BASE_URL}/pg/issuer/credential
 
 The Lab test issuer returns {"format": "dc+sd-jwt", "credential": "<sd-jwt>",
-"issuer": "<issuer ID>"}: an SD-JWT VC attesting your run's handle, bound to
+"issuer": "${DID}"}: an SD-JWT VC attesting your run's handle, bound to
 your key, with handle selectively disclosable. Doors that
-ask for a credential ask for this one. Issuer metadata:
-${BASE_URL}/.well-known/jwt-vc-issuer/pg/issuer
+ask for a credential ask for this one. The issuer is the Lab's did:webvh; its
+signing key is ${issuer.kid}, in the DID log at ${BASE_URL}/.well-known/did.jsonl
 
 ## 3. Go through a door
 
@@ -91,7 +91,7 @@ ${Object.values(DOORS).map((d) => `### ${d.INFO.door}
 ## Keys and state
 
 - Verifier and issuer keys: ${BASE_URL}/pg/jwks.json (verify receipts here)
-- Verifier DID document: ${BASE_URL}/.well-known/did.json
+- Verifier DID: ${DID}, its log at ${BASE_URL}/.well-known/did.jsonl (a parallel did:web at /.well-known/did.json)
 - Every door's live state: ${BASE_URL}/pg/state
 `;
 const DOOR_PATH = /^\/pg\/doors\/([a-z0-9-]+)(?:\/r\/([A-Za-z0-9_-]{22}))?$/;
@@ -148,8 +148,8 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     if (Object.hasOwn(DOORS, p.slice(1))) return send(res, 200, DOOR_PAGE);
     if (p === '/pg/state') return send(res, 200, { doors: Object.values(DOORS).map((d) => ({ ...d.INFO, ...store.wallState(d.INFO.door, d.THROUGH) })) });
     if (p === '/pg/jwks.json') return send(res, 200, { keys: [verifier.jwk, issuer.jwk] });
-    if (p === '/.well-known/did.json') return send(res, 200, didDocument);
-    if (p === '/.well-known/jwt-vc-issuer/pg/issuer') return send(res, 200, issuerMetadata);
+    if (p === '/.well-known/did.jsonl') return send(res, 200, Buffer.from(didLogText), { 'Content-Type': 'text/jsonl; charset=utf-8' });
+    if (p === '/.well-known/did.json') return send(res, 200, didWebDocument);
     if (p.startsWith('/pg/attempts/')) {
       const a = store.attemptDetail(p.slice('/pg/attempts/'.length));
       return a ? send(res, 200, a) : send(res, 404, { error: 'unknown_attempt' });
@@ -184,7 +184,7 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     const handle = typeof run === 'string' ? store.handleOf(run) : null;
     if (!handle) return send(res, 400, { error: 'unknown_run', message: `Send {"jwk": ..., "run": <run ID>}. ${START} to get a run ID.` });
     try {
-      return send(res, 200, { format: 'dc+sd-jwt', credential: await issueCredential(jwk, handle), issuer: issuerMetadata.issuer });
+      return send(res, 200, { format: 'dc+sd-jwt', credential: await issueCredential(jwk, handle), issuer: DID });
     } catch (e) {
       return send(res, 400, { error: 'invalid_request', message: (e as Error).message });
     }

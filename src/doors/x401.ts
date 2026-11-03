@@ -16,7 +16,7 @@ import { lookup } from 'node:dns/promises';
 import { BlockList } from 'node:net';
 import { SignJWT, decodeJwt, decodeProtectedHeader, importJWK, importX509, jwtVerify, type JWK, type JWTPayload } from 'jose';
 import type { IncomingHttpHeaders } from 'node:http';
-import { BASE_URL, DID, ISSUER_ID, ORIGIN, issuer, verifier } from '../lab.ts';
+import { BASE_URL, DID, ORIGIN, issuer, verifier } from '../lab.ts';
 import { VCT, digest } from '../issuer.ts';
 import * as store from '../store.ts';
 
@@ -70,7 +70,7 @@ export const INFO = {
   ladder: LADDER.map((s) => ({ name: s.name, url: `${SPEC_URL}#${s.ref}` })),
   asks: dcql('<run handle>'),
   modes: ['openid4vp-v1-signed', 'openid4vp-v1-unsigned'],
-  trusts: ISSUER_ID,
+  trusts: DID,
 };
 
 type Reply = { status: number; headers: Record<string, string>; body: unknown };
@@ -124,7 +124,7 @@ async function challenge(runId: string | null, route: string, method: string): P
     dcql_query: dcql(runId && store.handleOf(runId)),
     client_metadata: { vp_formats_supported: { 'dc+sd-jwt': { 'sd-jwt_alg_values': ALGS, 'kb-jwt_alg_values': ALGS } } },
   };
-  // The signed entry: a JAR whose client_id resolves to the door's key via did:web.
+  // The signed entry: a JAR whose client_id resolves to the door's key via did:webvh.
   const jar = await new SignJWT({ ...openid4vp, client_id: CLIENT_ID, expected_origins: [ORIGIN] })
     .setProtectedHeader({ alg: 'ES256', typ: 'oauth-authz-req+jwt', kid: verifier.kid })
     .setAudience('https://self-issued.me/v2')
@@ -164,7 +164,7 @@ async function challenge(runId: string | null, route: string, method: string): P
       message: 'This door wants an x401 proof. Decode the PROOF-REQUEST header (base64url JSON), answer one of its requests, and retry this URL with PROOF-RESPONSE.',
       x401: payload,
       ...(!runId && { start_a_run: `POST {"handle": "<your-handle>"} to ${BASE_URL}/pg/runs, then use the x401 door URL it returns.` }),
-      need_a_credential: `POST {"jwk": <your holder public JWK>, "run": <run ID>} to ${ISSUER_ID}/credential`,
+      need_a_credential: `POST {"jwk": <your holder public JWK>, "run": <run ID>} to ${BASE_URL}/pg/issuer/credential`,
       instructions: `${BASE_URL}/llms.txt`,
       attempt,
       watch: `${BASE_URL}/x401#attempt=${attempt}`,
@@ -215,14 +215,15 @@ async function retry(runId: string | null, route: string, method: string, header
     // signature valid: issuer JWT, every disclosure digest, holder KB-JWT, sd_hash
     const sig = 'signature valid';
     const { iss } = await guard(sig, 'invalid_signature', () => decodeJwt(issuerJwt));
-    const { x5c, alg } = await guard(sig, 'invalid_signature', () => decodeProtectedHeader(issuerJwt));
+    const { x5c, alg, kid } = await guard(sig, 'invalid_signature', () => decodeProtectedHeader(issuerJwt));
+    // The Lab's own DID: the key is its #issuer verification method, so kid must name it.
     const issuerKey =
-      iss === ISSUER_ID
-        ? issuer.publicKey
+      iss === DID
+        ? kid === issuer.kid ? issuer.publicKey : undefined
         : x5c?.[0] && ALGS.includes(alg ?? '')
           ? await guard(sig, 'invalid_signature', () => importX509(`-----BEGIN CERTIFICATE-----\n${x5c[0]}\n-----END CERTIFICATE-----`, alg!))
           : undefined;
-    need(issuerKey, sig, 'issuer_key_unresolved', `No key for issuer ${iss}: the door knows the Lab test issuer, and reads an x5c header.`);
+    need(issuerKey, sig, 'issuer_key_unresolved', `No key for issuer ${iss}${kid ? ` (kid ${kid})` : ''}: the door knows the Lab DID's ${issuer.kid}, and reads an x5c header.`);
     const claims: JWTPayload & { _sd?: string[]; vct?: string; cnf?: { jwk?: JWK } } = (
       await guard(sig, 'invalid_signature', () => jwtVerify(issuerJwt, issuerKey, { algorithms: ALGS }))
     ).payload;
@@ -262,8 +263,8 @@ async function retry(runId: string | null, route: string, method: string, header
     handle = disclosed.handle as string;
 
     // issuer trusted
-    need(iss === ISSUER_ID, 'issuer trusted', 'untrusted_issuer', `This door trusts the Lab test issuer, ${ISSUER_ID}; this credential is from ${iss}.`);
-    pass('issuer trusted', 'Issued by the Lab test issuer.');
+    need(iss === DID, 'issuer trusted', 'untrusted_issuer', `This door trusts the Lab test issuer, ${DID}; this credential is from ${iss}.`);
+    pass('issuer trusted', `Issued by the Lab test issuer, ${DID}.`);
   } catch (e) {
     if (!(e instanceof Stop)) throw e;
     const id = attempt?.id ?? store.newAttempt({ door: 'x401', runId, nonce: null, nonceExpires: null, step: 0, timeline: [] });
@@ -289,7 +290,7 @@ async function retry(runId: string | null, route: string, method: string, header
     request_mode: mode,
     steps: LADDER.map((s) => s.name),
     proves: INFO.proves,
-    trusted_issuer: ISSUER_ID,
+    trusted_issuer: DID,
   })
     .setProtectedHeader({ alg: 'ES256', typ: 'pg-receipt+jwt', kid: verifier.kid })
     .setIssuer(DID)

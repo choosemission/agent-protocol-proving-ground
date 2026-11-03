@@ -12,12 +12,13 @@ import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { after, before, test } from 'node:test';
-import { SignJWT, createLocalJWKSet, importPKCS8, jwtVerify } from 'jose';
+import { SignJWT, createLocalJWKSet, decodeJwt, decodeProtectedHeader, importJWK, importPKCS8, jwtVerify, type JWK } from 'jose';
+import { defaultVerifier, resolveDIDFromLog } from 'didwebvh-ts';
 import { challenge, decode, encode, getCredential, newHolder, present, resultArtifact } from '../client.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), 'pg-'));
 const port = 20000 + Math.floor(Math.random() * 20000);
-const BASE = `http://localhost:${port}`;
+const BASE = `http://pg.localhost:${port}`;
 Object.assign(process.env, { PORT: String(port), DATA_DIR: tmp });
 const { server } = await import('../src/server.ts');
 after(() => server.close());
@@ -80,6 +81,9 @@ async function stopsAt(step: string, error: string, r: Awaited<ReturnType<typeof
 }
 
 /** A credential signed by a key the door can find (x5c) but does not trust. */
+/** The Lab credential's issuer and its key ID. */
+const labIssuer = () => ({ iss: decodeJwt(credential).iss as string, kid: decodeProtectedHeader(credential).kid as string });
+
 function foreignIssuer() {
   execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-days', '1', '-subj', '/CN=foreign.example', '-keyout', join(tmp, 'f.key'), '-out', join(tmp, 'f.crt')], { stdio: 'ignore' });
   const x5c = readFileSync(join(tmp, 'f.crt'), 'utf8').replace(/-----[^-]+-----|\s/g, '');
@@ -87,10 +91,10 @@ function foreignIssuer() {
 }
 
 /** Re-signs the Lab credential's payload under another issuer. */
-async function reissue(iss: string, signer: { key: CryptoKey; x5c?: string[] }, edit = (c: Record<string, unknown>) => c) {
+async function reissue(iss: string, signer: { key: CryptoKey; x5c?: string[]; kid?: string }, edit = (c: Record<string, unknown>) => c) {
   const [jwt, ...disclosures] = credential.split('~').filter(Boolean);
   const claims = edit(decode(jwt.split('.')[1]));
-  const reissued = await new SignJWT({ ...claims, iss }).setProtectedHeader({ alg: 'ES256', typ: 'dc+sd-jwt', x5c: signer.x5c }).sign(signer.key);
+  const reissued = await new SignJWT({ ...claims, iss }).setProtectedHeader({ alg: 'ES256', typ: 'dc+sd-jwt', x5c: signer.x5c, kid: signer.kid }).sign(signer.key);
   return `${reissued}~${disclosures.join('~')}~`;
 }
 
@@ -104,6 +108,32 @@ test('signed request: through, with a receipt that verifies against the door JWK
   assert.equal(payload.sub, 'test-team');
   assert.equal(payload.request_mode, 'openid4vp-v1-signed');
   assert.equal(payload.jti, r.body.attempt);
+});
+
+test('the door\'s client_id is a did:webvh whose served log verifies and names the JAR key', async () => {
+  const { signed } = await challenge(door); // resolves did.jsonl with didwebvh-ts and checks the JAR
+  const did = signed.client_id!.replace(/^decentralized_identifier:/, '');
+  assert.match(did, new RegExp(`^did:webvh:[^:]+:pg\\.localhost%3A${port}$`));
+  const res = await fetch(`${BASE}/.well-known/did.jsonl`);
+  assert.match(res.headers.get('content-type')!, /^text\/jsonl/);
+  const genesis = JSON.parse((await res.text()).split('\n')[0]);
+  assert.equal(genesis.parameters.portable, true);
+  const web = await (await fetch(`${BASE}/.well-known/did.json`)).json();
+  assert.equal(web.id, `did:web:pg.localhost%3A${port}`);
+  assert.ok(web.alsoKnownAs.includes(did));
+});
+
+test('the handle credential is issued by the Lab did:webvh and verifies against its #issuer key', async () => {
+  const { signed } = await challenge(door);
+  const did = signed.client_id!.replace(/^decentralized_identifier:/, '');
+  const { iss, kid } = labIssuer();
+  assert.equal(iss, did); // one DID, verifier and issuer
+  assert.equal(kid, `${did}#issuer`);
+  const log = (await (await fetch(`${BASE}/.well-known/did.jsonl`)).text()).trim().split('\n').map((l) => JSON.parse(l));
+  const { didDocument } = await resolveDIDFromLog(log, { verifier: defaultVerifier });
+  assert.ok(didDocument!.assertionMethod!.includes(kid));
+  const vm = didDocument!.verificationMethod!.find((v) => v.id === kid)!;
+  await jwtVerify(credential.split('~')[0], await importJWK(vm.publicKeyJwk as JWK, 'ES256'), { typ: 'dc+sd-jwt' });
 });
 
 test('unsigned request: through, bound to the origin', async () => {
@@ -148,7 +178,7 @@ test('an issuer with no findable key stops at signature valid', async () => {
 
 test('a credential claiming the Lab issuer but signed by another key stops at signature valid', async () => {
   const forger = await newHolder();
-  await stopsAt('signature valid', 'invalid_signature', await attempt({ credential: await reissue(`${BASE}/pg/issuer`, { key: forger.key }) }));
+  await stopsAt('signature valid', 'invalid_signature', await attempt({ credential: await reissue(labIssuer().iss, { key: forger.key, kid: labIssuer().kid }) }));
 });
 
 test('a tampered KB-JWT stops at signature valid', async () => {

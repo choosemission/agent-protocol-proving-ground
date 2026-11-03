@@ -1,41 +1,93 @@
 /**
- * Who the Lab is on this host: its base URL, the proving ground's did:web, and
- * the two signing keys, the verifier's (every door's requests and receipts)
- * and the test issuer's (credentials). Keys are made on first start and kept in DATA_DIR, so
- * receipts and credentials stay verifiable across restarts.
+ * Who the Lab is on this host: its base URL and its one did:webvh, which is both
+ * the verifier (every door's requests and receipts, key #verifier) and the test
+ * issuer (credentials, key #issuer). A third key, the DID's update key, signs the DID log. Keys and
+ * the DID log are made on first start and kept in DATA_DIR, so the DID, receipts
+ * and credentials stay the same across restarts. A new host needs a new DATA_DIR,
+ * and so gets a new DID.
  */
+import { createPrivateKey, sign } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { exportJWK, generateKeyPair, importJWK, type JWK } from 'jose';
+import {
+  MultibaseEncoding, createDID, defaultVerifier, generateParallelDidWeb, multibaseEncode, prepareDataForSigning, resolveDIDFromLog,
+  type DIDDocument, type DIDLog, type Signer,
+} from 'didwebvh-ts';
 
 export const PORT = Number(process.env.PORT ?? 8401);
-export const BASE_URL = (process.env.BASE_URL ?? `http://localhost:${PORT}`).replace(/\/$/, '');
+// did:webvh needs a domain name, so not bare localhost; *.localhost resolves to this machine.
+export const BASE_URL = (process.env.BASE_URL ?? `http://pg.localhost:${PORT}`).replace(/\/$/, '');
 export const ORIGIN = new URL(BASE_URL).origin;
 export const DATA_DIR = process.env.DATA_DIR ?? 'data';
+const HOST = new URL(BASE_URL).host;
 
-/** The verifier's identifier, shared by every door; resolves to `${ORIGIN}/.well-known/did.json`. */
-export const DID = `did:web:${encodeURIComponent(new URL(BASE_URL).host)}`;
-export const ISSUER_ID = `${BASE_URL}/pg/issuer`;
-
-async function loadOrCreate(name: string, kid: string) {
+async function privateJwk(name: string, alg: 'ES256' | 'Ed25519'): Promise<JWK> {
   const file = join(DATA_DIR, `${name}.key.json`);
   if (!existsSync(file)) {
-    const { privateKey } = await generateKeyPair('ES256', { extractable: true });
+    const { privateKey } = await generateKeyPair(alg, { extractable: true });
     mkdirSync(DATA_DIR, { recursive: true });
     writeFileSync(file, JSON.stringify(await exportJWK(privateKey)), { mode: 0o600 });
   }
-  const { kty, crv, x, y, d } = JSON.parse(readFileSync(file, 'utf8')) as JWK;
+  return JSON.parse(readFileSync(file, 'utf8'));
+}
+
+async function es256(name: string, kid: string) {
+  const { kty, crv, x, y, d } = await privateJwk(name, 'ES256');
   const jwk: JWK = { kty, crv, x, y, kid, alg: 'ES256', use: 'sig' };
   return { kid, jwk, key: (await importJWK({ ...jwk, d }, 'ES256')) as CryptoKey, publicKey: (await importJWK(jwk, 'ES256')) as CryptoKey };
 }
 
-export const verifier = await loadOrCreate('verifier', `${DID}#verifier`);
-export const issuer = await loadOrCreate('issuer', `${ISSUER_ID}#key-1`);
+/** The DID log: read from DATA_DIR, or created for this host on first start. */
+async function didLog(keys: Record<'verifier' | 'issuer', JWK>): Promise<DIDLog> {
+  const file = join(DATA_DIR, 'did.jsonl');
+  if (!existsSync(file)) {
+    const update = await privateJwk('did-update', 'Ed25519');
+    const updateKey = multibaseEncode(new Uint8Array([0xed, 0x01, ...Buffer.from(update.x!, 'base64url')]), MultibaseEncoding.BASE58_BTC);
+    const privateKey = createPrivateKey({ key: update as never, format: 'jwk' });
+    const signer: Signer = {
+      getVerificationMethodId: () => `did:key:${updateKey}#${updateKey}`,
+      sign: async ({ document, proof }) => ({ proofValue: multibaseEncode(sign(null, await prepareDataForSigning(document, proof), privateKey), MultibaseEncoding.BASE58_BTC) }),
+    };
+    const { log } = await createDID({
+      address: HOST, signer, verifier: defaultVerifier, updateKeys: [updateKey],
+      // Only settable at creation; lets this DID move host later and keep its history.
+      portable: true,
+      alsoKnownAsWeb: true,
+      didDocument: {
+        '@context': ['https://www.w3.org/ns/did/v1'],
+        id: '{DID}',
+        verificationMethod: Object.entries(keys).map(([name, jwk]) => ({ id: `{DID}#${name}`, type: 'JsonWebKey2020', controller: '{DID}', publicKeyJwk: jwk as never })),
+        // #verifier signs requests and receipts; #issuer signs credentials (assertions).
+        assertionMethod: ['{DID}#verifier', '{DID}#issuer'],
+        authentication: ['{DID}#verifier'],
+      },
+    });
+    writeFileSync(file, log.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  }
+  return readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+}
 
-export const didDocument = {
-  '@context': ['https://www.w3.org/ns/did/v1'],
-  id: DID,
-  verificationMethod: [{ id: verifier.kid, type: 'JsonWebKey2020', controller: DID, publicKeyJwk: verifier.jwk }],
-  assertionMethod: [verifier.kid],
-  authentication: [verifier.kid],
-};
+const pub = async (name: string) => (({ kty, crv, x, y }) => ({ kty, crv, x, y }))(await privateJwk(name, 'ES256'));
+const keys = { verifier: await pub('verifier'), issuer: await pub('issuer') };
+const log = await didLog(keys);
+const { didDocument: doc, didResolutionMetadata: meta } = await resolveDIDFromLog(log, { verifier: defaultVerifier });
+if (!doc) throw new Error(`${DATA_DIR}/did.jsonl does not resolve: ${JSON.stringify(meta)}`);
+
+/** The Lab's identifier, as verifier (every door's client_id) and as issuer; its log is at `${ORIGIN}/.well-known/did.jsonl`. */
+export const DID = doc.id;
+if (!DID.endsWith(`:${encodeURIComponent(HOST)}`)) {
+  throw new Error(`${DATA_DIR}/did.jsonl is ${DID}, not for ${HOST}. A new host gets a new DID: point DATA_DIR at an empty directory.`);
+}
+for (const [name, jwk] of Object.entries(keys)) {
+  const listed = doc.verificationMethod?.find((v) => v.id === `${DID}#${name}`)?.publicKeyJwk as JWK | undefined;
+  if (listed?.x !== jwk.x) throw new Error(`${DATA_DIR}/did.jsonl does not list ${DATA_DIR}/${name}.key.json as #${name}. Start with an empty DATA_DIR.`);
+}
+
+export const verifier = await es256('verifier', `${DID}#verifier`);
+export const issuer = await es256('issuer', `${DID}#issuer`);
+
+/** did.jsonl as served: one log entry per line. */
+export const didLogText = log.map((e) => JSON.stringify(e)).join('\n') + '\n';
+/** The parallel did:web document, for resolvers that only know did:web. */
+export const didWebDocument: DIDDocument = generateParallelDidWeb(DID, doc);
