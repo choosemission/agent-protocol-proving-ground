@@ -1,0 +1,23 @@
+{
+  "name": "@mission/proving-ground",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Agent Lab proving ground: an x401 door to a fictional company's records, and a live results wall.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "try": "node client.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "jose": "^6.2.15"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}
