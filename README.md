@@ -10,6 +10,7 @@ It claims nothing about conformance.
 | Door | Protocol | Docs |
 | --- | --- | --- |
 | `x401` | x401 0.2.0 at `proof/x401@7e864af`, OpenID4VP + SD-JWT VC | [src/doors/x401.md](src/doors/x401.md) |
+| `poppy` | Personal Agent Protocol 0.3 at `personal-agent-protocol@6fb46d3`: Session JWTs, conversations, sign-in at Keycloak | [src/doors/poppy.md](src/doors/poppy.md), [docs/keycloak-realm.md](docs/keycloak-realm.md) |
 
 ## Run it
 
@@ -28,6 +29,10 @@ npm run typecheck
 | `BASE_URL` | `http://pg.localhost:$PORT` | Public URL. Sets the verifier's `did:webvh`, the issuer ID and every link. Must be a domain name (did:webvh refuses bare `localhost`; `*.localhost` resolves to this machine) |
 | `DATA_DIR` | `./data` | SQLite database, the signing keys and the DID log (`did.jsonl`), made on first start. Keep it on a persistent volume: it *is* the DID. A new host needs an empty one, and gets a new DID |
 
+**Dev switch.** When `BASE_URL` is `http://localhost`, `http://*.localhost` or `http://127.0.0.1`, doors accept `http` URLs
+and loopback addresses from agents that the specs would refuse, such as a poppy agent's client
+metadata on `http://localhost`. Anywhere else they are refused.
+
 ## For agents
 
 `/llms.txt` gives an agent the Lab-specific steps in full: start a run, get
@@ -45,6 +50,10 @@ A run is one handle, with a row on every door's wall.
 curl -X POST pg.localhost:8401/pg/runs -H 'content-type: application/json' -d '{"handle":"relaybox"}'
 # → {"handle": "relaybox", "run": "<run>", "doors": {"x401": "http://pg.localhost:8401/pg/doors/x401/r/<run>"}, ...}
 ```
+
+Add `"client_id": "<Personal Agent client_id>"` to link a Poppy agent to the run: Poppy
+requests carry no run ID, so the poppy door finds the run by the Session JWT's `iss`
+(see [src/doors/poppy.md](src/doors/poppy.md#linking-an-agent-to-a-run)).
 
 Point an agent at a door URL. Anyone can also call a door without a run at
 `/pg/doors/<door>`; those attempts share that wall's anonymous row. The run
@@ -87,15 +96,19 @@ handles, never run IDs.
 | [`public/door.html`](public/door.html) | A door's wall, at `/<door>`: runs, live feed, funnel, stop codes, attempt timelines |
 | [`public/style.css`](public/style.css) | Shared styles |
 | [`client.ts`](client.ts) | Reference agent and wallet for the x401 door |
-| [`test/e2e.test.ts`](test/e2e.test.ts) | The real server, driven through every stop |
+| [`poppy-client.ts`](poppy-client.ts) | Reference Personal Agent for the poppy door |
+| [`docs/keycloak-realm.md`](docs/keycloak-realm.md) | Setting up the poppy door's Keycloak realm |
+| [`test/e2e.test.ts`](test/e2e.test.ts), [`test/poppy.test.ts`](test/poppy.test.ts) | The real server, driven through every stop of each door (poppy against a stand-in Keycloak) |
 
 ## Adding a door
 
 Add `src/doors/<name>.ts` exporting `INFO` (`door`, `spec`, `proves`,
-`about`, `ladder`), `THROUGH` (the index of the last step) and
-`serve(runId, route, method, headers)`, which records attempts with
-`store.newAttempt({door: '<name>', ...})`. Register it in `DOORS` in
-[`src/server.ts`](src/server.ts) and document it next to the code.
+`about`, `builds_on`, `ladder`), `THROUGH` (the index of the last step) and
+`serve(request)`, which gets a `DoorRequest` ([`src/lab.ts`](src/lab.ts): the run, the
+method, the path below the door's URL, the full URL, headers and body) and records attempts
+with `store.newAttempt({door: '<name>', ...})`. A door that needs documents at fixed paths
+exports `WELL_KNOWN` (path → document), as poppy does. Register it in `DOORS` (and
+`WELL_KNOWN`) in [`src/server.ts`](src/server.ts) and document it next to the code.
 
 ## Not built yet
 
