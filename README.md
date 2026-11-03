@@ -10,7 +10,7 @@ It claims nothing about conformance.
 | Door | Protocol | Docs |
 | --- | --- | --- |
 | `x401` | x401 0.2.0 at `proof/x401@7e864af`, OpenID4VP + SD-JWT VC | [src/doors/x401.md](src/doors/x401.md) |
-| `poppy` | Personal Agent Protocol 0.3 at `personal-agent-protocol@6fb46d3`: Session JWTs, conversations, sign-in at Keycloak | [src/doors/poppy.md](src/doors/poppy.md), [docs/keycloak-realm.md](docs/keycloak-realm.md) |
+| `poppy` | Personal Agent Protocol 0.3 at `personal-agent-protocol@6fb46d3`: Session JWTs, conversations, and the door as its own OAuth issuer | [src/doors/poppy.md](src/doors/poppy.md) |
 
 ## Run it
 
@@ -97,8 +97,7 @@ handles, never run IDs.
 | [`public/style.css`](public/style.css) | Shared styles |
 | [`client.ts`](client.ts) | Reference agent and wallet for the x401 door |
 | [`poppy-client.ts`](poppy-client.ts) | Reference Personal Agent for the poppy door |
-| [`docs/keycloak-realm.md`](docs/keycloak-realm.md) | Setting up the poppy door's Keycloak realm |
-| [`test/e2e.test.ts`](test/e2e.test.ts), [`test/poppy.test.ts`](test/poppy.test.ts) | The real server, driven through every stop of each door (poppy against a stand-in Keycloak) |
+| [`test/e2e.test.ts`](test/e2e.test.ts), [`test/poppy.test.ts`](test/poppy.test.ts) | The real server, driven through every stop of each door |
 
 ## Adding a door
 

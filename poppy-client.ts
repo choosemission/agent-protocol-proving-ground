@@ -6,16 +6,16 @@
  *
  * 1. Discovery (3, 3.2): poppy.json, the protected resource metadata, the issuer's metadata.
  * 2. Identity (4.1): serve a client metadata document and JWKS; client_id is the document's URL.
- *    Locally that's http://localhost:<port>; the issuer can only fetch the JWKS through --public-url.
+ *    Locally that's http://localhost:<port>; a remote proving ground can only fetch it through --public-url.
  * 3. Register the client_id with a run (proving-ground specific).
  * 4. A Session (5.2): a delegated key for this User, a delegation signed by the JWKS key, and a
  *    Session JWT per request.
  * 5. Start a conversation, read the reply and its authorization event (8.3, 8.5, 8.11).
  * 6. Direct Sign-In (4.2): authorization code + PKCE, iss check, private_key_jwt assertion to the issuer.
  * 7. Continue the conversation signed in, with ath, and read the reply with the receipt.
+ * 8. Refresh (4.4) and revoke (4.6): exported, used by the tests.
  *
- * Skipped: DPoP (a SHOULD; the door verifies it if the token is bound), refresh and revocation,
- * Web Bot Auth signatures, SSE.
+ * Skipped: DPoP (the door issues Bearer tokens), Web Bot Auth signatures, SSE.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -137,17 +137,27 @@ export async function signIn(agent: Agent, company: Company, scope: string, brow
   if (back.get('iss') !== company.issuer) throw new Error(`sign-in came back with iss ${back.get('iss')}, not ${company.issuer}`);
   if (back.get('state') !== state) throw new Error('sign-in came back with the wrong state');
   if (!back.get('code')) throw new Error(`sign-in declined: ${back.get('error')}`);
-  const tokens = await getJson(company.as.token_endpoint, {
-    method: 'POST',
-    body: new URLSearchParams({
-      grant_type: 'authorization_code', code: back.get('code')!, redirect_uri: redirectUri, code_verifier: verifier,
-      client_id: agent.clientId, client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: await assertion(agent, company.issuer),
-    }),
-  });
+  const tokens = await tokenRequest(agent, company, company.as.token_endpoint, { grant_type: 'authorization_code', code: back.get('code')!, redirect_uri: redirectUri, code_verifier: verifier });
   const granted = String(tokens.scope ?? scope).split(' ');
   if (!granted.includes(scope)) throw new Error(`the User didn't grant ${scope}`);
-  return tokens as { access_token: string; refresh_token?: string; token_type: string };
+  return tokens as { access_token: string; refresh_token?: string; token_type: string; scope?: string };
 }
+
+/** A request to the token or revocation endpoint, authenticated with a client assertion (4.1). */
+export async function tokenRequest(agent: Agent, company: Company, url: string, params: Record<string, string>) {
+  return getJson(url, {
+    method: 'POST',
+    body: new URLSearchParams({ ...params, client_id: agent.clientId, client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: await assertion(agent, company.issuer) }),
+  });
+}
+
+/** A new access token from a refresh token (4.4); `scope` may ask for fewer. */
+export const refresh = (agent: Agent, company: Company, refreshToken: string, scope?: string) =>
+  tokenRequest(agent, company, company.as.token_endpoint, { grant_type: 'refresh_token', refresh_token: refreshToken, ...(scope && { scope }) });
+
+/** Revokes a refresh token (4.6): with every refresh token for an account, that's sign-out. */
+export const revoke = (agent: Agent, company: Company, refreshToken: string) =>
+  tokenRequest(agent, company, company.as.revocation_endpoint, { token: refreshToken, token_type_hint: 'refresh_token' });
 
 /** Every Company message in a read, as text. */
 export const companySaid = (read: { events: { type: string; message?: { role: string; text?: string } }[] }) =>

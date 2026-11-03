@@ -12,7 +12,7 @@ Code: [`poppy.ts`](poppy.ts). Reference Personal Agent: [`poppy-client.ts`](../.
 meant to be read next to the spec.
 
 ```sh
-node poppy-client.ts http://localhost:8401                       # signed-out steps; sign-in needs an issuer that can reach your JWKS
+node poppy-client.ts http://pg.localhost:8401                    # every step, locally; open the sign-in link it prints
 node poppy-client.ts https://<proving ground> --public-url https://<tunnel to :8402>
 ```
 
@@ -21,15 +21,15 @@ node poppy-client.ts https://<proving ground> --public-url https://<tunnel to :8
 | | |
 | --- | --- |
 | Discovery | `/.well-known/poppy.json` and `/.well-known/oauth-protected-resource` (`resource` is the door's origin, `authorization_servers` the issuer) |
-| Identifier, Session `aud` | The issuer, `POPPY_ISSUER` (Keycloak realm `protocol-proving-experiments`) |
+| Identifier, Session `aud` | The issuer: the door itself, `<BASE_URL>/pg/doors/poppy` |
 | Company Agent | `poppy` protocol at `<BASE_URL>/pg/doors/poppy/conversations` |
 | Scope | `conversations`: "Let the Company Agent see which account you signed in with, in a conversation". Hints: `changes: none`, `personal_data: false` |
-| Sign-in | Direct Sign-In at the issuer. The door never sees it; it verifies the access tokens |
+| Sign-in | Direct Sign-In at the door's own issuer (below), with a test account |
 
 The Company Agent is canned. Signed out, it echoes your message and adds an `authorization`
 event asking for `conversations`
 ([8.11](https://personalagentprotocol.org/docs/0.3/spec#conversation-sign-in)). Signed in with
-that scope, it echoes, names the account (last four characters of the issuer's `sub`), and puts a
+that scope, it echoes, names the test account you signed in as, and puts a
 receipt in the reply's `data.receipt`: an ES256 JWT, `typ: pg-receipt+jwt`, verifiable against
 `/pg/jwks.json`, with `sub` your run's handle and `jti` the attempt.
 
@@ -41,20 +41,37 @@ So the door links by `client_id`:
 ```sh
 curl -X POST localhost:8401/pg/runs -H 'content-type: application/json' \
   -d '{"handle": "relaybox", "client_id": "https://agent.example/agent.json"}'
-# → {..., "poppy": {"client_metadata": "valid", "issuer": "Registered at the issuer as ...", "discovery": ...}}
+# → {..., "poppy": {"client_metadata": "valid", "discovery": ...}}
 ```
 
-The door fetches and checks the client metadata document then, and registers a client at the
-issuer for it (so sign-in works before the first Session request). If the document is wrong, the
-run is still made, and `poppy.problem` says why; the door fetches it again on every Session request
-after its 5-minute cache expires, and re-registers at the issuer when `jwks_uri`, `redirect_uris`
-or `client_name` change. One `client_id` belongs to one run.
+The door fetches and checks the client metadata document then. If it is wrong, the run is still
+made, and `poppy.problem` says why; the door fetches it again on every request after its 5-minute
+cache expires. One `client_id` belongs to one run.
 
 **No anonymous use.** A Session JWT whose `iss` no run registered gets `invalid_session` with
 `error_description` "client_id refused: ... POST {handle, client_id} to /pg/runs first"
 ([4.1](https://personalagentprotocol.org/docs/0.3/spec#agent-identity) lets a Company refuse a
-`client_id` this way). The issuer would refuse it anyway, because the door is what registers
-clients there. These attempts show on the wall's anonymous row.
+`client_id` this way). These attempts show on the wall's anonymous row. Sign-in itself needs no
+run: the issuer accepts any `client_id` whose metadata checks out.
+
+## The issuer
+
+The door is its own OAuth issuer ([3.2](https://personalagentprotocol.org/docs/0.3/spec#oauth-server)),
+so it needs nothing from outside and nobody registers a client: the `client_id` URL *is* the
+registration ([CIMD](https://datatracker.ietf.org/doc/draft-ietf-oauth-client-id-metadata-document/)).
+Its metadata is at `/.well-known/oauth-authorization-server/pg/doors/poppy` (RFC 8414 §3.1), with
+`protected_resources: [<origin>]`.
+
+| Endpoint | What it does | Refuses with |
+| --- | --- | --- |
+| `GET …/authorize` | Fetches the client metadata. `redirect_uri` must match one of its `redirect_uris` exactly, or differ only in a loopback URI's port (RFC 8252 §7.3); until both check out, errors show on a page and never redirect. Then: `response_type=code`, PKCE `S256`, `scope` present and only `conversations`. Shows a consent page naming the client's **domain** (not its self-chosen `client_name`) | `invalid_request`, `invalid_scope`, `unsupported_response_type`, back to the client with `iss` and `state` |
+| `POST …/authorize` | The User's click: **Allow** as a test account (default `test-user`, any name; no password), or **Deny**. Sends the browser back with `code` (or `error=access_denied`) and always `iss` (RFC 9207) | |
+| `POST …/token` | `authorization_code` (one use, 60 s, same client and `redirect_uri`, PKCE checked) or `refresh_token` (same client; `scope` may narrow). Client auth is `private_key_jwt` only: an ES256 or PS384 assertion signed by a `jwks_uri` key, `iss` = `sub` = `client_id`, with `exp`, `iat`, `jti`, and `aud` **exactly** the issuer as one string, so the token endpoint URL, an array or a trailing slash are refused (4.1). Returns an opaque Bearer access token (10 min), a refresh token (30 days, not rotated, use doesn't extend it), and exactly the scope granted | `invalid_client` (401), `invalid_grant`, `invalid_scope`, `unsupported_grant_type` |
+| `POST …/revoke` | RFC 7009, same client auth. Revoking a refresh token also revokes the access tokens made from it | `invalid_client` (401) |
+
+The consent page can't be framed (`X-Frame-Options: DENY`). Tokens are opaque because the door is
+the only resource that takes them. Like Sessions and conversations, they are in memory: a restart
+signs everyone out.
 
 ## The ladder
 
@@ -72,15 +89,14 @@ on the anonymous row.
 | [session valid](https://personalagentprotocol.org/docs/0.3/spec#session-verification) | `kid` is the delegated key's RFC 7638 thumbprint and the signature verifies with it (`typ` `poppy-session+jwt`, ES256); `sid`, `sub`, `htm`, `htu`, `jti`, `iat` present; `aud` is the issuer as one string; `htm`/`htu` match the request; `iat` within 60 s; `ath` matches the token, or is absent without one; a known `sid` keeps its `sub` and `agent_id` | `session_signature`, `session_claims`, `aud_mismatch`, `htu_mismatch`, `iat_out_of_window`, `ath_mismatch`, `sub_mismatch` |
 | [conversation started](https://personalagentprotocol.org/docs/0.3/spec#sending-messages) | `POST {endpoint}` (or `.../messages`) with a valid message is accepted: 201 (202). A retried message ID with the same content gets the original response | `invalid_request`, `message_id_conflict` |
 | [reply read](https://personalagentprotocol.org/docs/0.3/spec#reading-events) | A read (`GET .../events`, or a `POST` with `wait`) returned a Company Agent message | `conversation_not_found`, `conversation_closed`, `invalid_cursor` |
-| [signed in](https://personalagentprotocol.org/docs/0.3/spec#access-tokens) | The access token verifies against the issuer's JWKS, with `iss` the issuer and `aud` including `BASE_URL`; it was issued to the Session's `client_id` (`azp`); if it is DPoP-bound (`cnf.jkt`), a valid DPoP proof comes with it; the Session hasn't used another account | `token_invalid`, `token_other_client`, `dpop_invalid`, `session_ended` |
+| [signed in](https://personalagentprotocol.org/docs/0.3/spec#access-tokens) | `Authorization: Bearer` carries an access token the issuer issued, unexpired and unrevoked; it was issued to the Session's `client_id`; the Session hasn't used another account | `token_invalid`, `token_other_client`, `session_ended` |
 | [authorized call](https://personalagentprotocol.org/docs/0.3/spec#conversation-sign-in) | A signed-in message with scope `conversations` was accepted; the conversation now uses that account | `account_required` |
 | through | A read returned the signed-in reply with its receipt | |
 
 How each stop answers, following [section 7](https://personalagentprotocol.org/docs/0.3/spec#apis)
 and [8.13](https://personalagentprotocol.org/docs/0.3/spec#conversation-errors): every Session
 check is `400 {"error": "invalid_session"}`, `session_ended` is 400, `token_invalid` is 401 with
-`WWW-Authenticate: Bearer error="invalid_token"`, `dpop_invalid` is 401 with
-`WWW-Authenticate: DPoP error="invalid_dpop_proof"`, `account_required` is a 401 challenge with no
+`WWW-Authenticate: Bearer error="invalid_token"`, `account_required` is a 401 challenge with no
 error code (`Bearer scope="conversations"`), and the conversation errors are their own codes.
 Every stop body also has `error_description`, `stopped_at`, `pg_stop` (the code above), and a
 `watch` link to the attempt's timeline.
@@ -93,38 +109,30 @@ documents carry no Session header (5.2), so the door can't tell whose fetch of `
 The first step it can attribute is a Session request. Using the right `aud` (the issuer) and
 endpoint is the evidence of discovery, and a wrong `aud` stops at `aud_mismatch`.
 
-**Sign-in failures** happen at the issuer, out of the door's sight. While a Session is signed out,
-each request pulls the client's new error events from the Keycloak events API (`*_ERROR` types,
-such as `CODE_TO_TOKEN_ERROR invalid_client_credentials`) onto the attempt's timeline. That is best
-effort: no admin secret, or an events API error, adds nothing.
+**Sign-in** happens on other requests than the conversation. For a `client_id` a run registered,
+what the issuer did (consent shown, approved or declined, tokens issued, and every refusal with its
+reason, such as `token refused, invalid_client: The assertion's aud must be the issuer...`) joins
+the timeline of the client's next Session request.
 
 ## Not scored
 
-The door relies on Keycloak for these, and Keycloak is more lenient than Poppy, so a Personal
-Agent can get these wrong and still get through. (This is Keycloak's documented default
-behaviour; none of it has been tried against this realm yet.)
-
-- **Client assertion `aud`.** Poppy says it MUST be the issuer, and anything else, including the
-  token endpoint, MUST be rejected (4.1). Keycloak also accepts the token endpoint URL.
-- **Unknown or missing scopes.** Poppy says `invalid_scope` (4.7). Keycloak drops unknown scopes
-  silently, and adds the realm's default client scopes (such as `profile` and `email`) to tokens. Poppy says a Company MUST
-  NOT grant scopes beyond those requested.
-- **`resource`** (RFC 8707). Keycloak ignores it; Poppy says `invalid_target` for one it doesn't
+- **`resource`** (RFC 8707). The issuer ignores it; Poppy says `invalid_target` for one it doesn't
   serve (4.5).
+- **DPoP.** The issuer only issues Bearer tokens, which 4.5 allows, so a DPoP proof is never needed.
 - **The agent's checks.** Whether the agent checked `organization.domain`, the issuer's
   `protected_resources`, `iss` in the authorization response, the device sign-in link's host, or
   `protocol_version`. The door can't see them; the reference client does them.
-- **Reused `jti`** in Session JWTs and assertions. A MAY; not checked.
+- **Reused `jti`** in Session JWTs and client assertions. A MAY; not checked.
 - **Web Bot Auth** operator signatures (5.3, a SHOULD).
 
 ## HTTPS and the dev switch
 
 The spec requires HTTPS for every URL it exchanges, and refuses private addresses. When
-`BASE_URL` is `http://localhost` or `http://127.0.0.1` (`DEV` in [`lab.ts`](../lab.ts)), the door
-accepts `http` client metadata, JWKS and redirect URIs, and fetches loopback addresses. That's how
-the tests run. On any other `BASE_URL`, `http` and private addresses are refused. A real Keycloak
-can't fetch an agent's JWKS from your `localhost`, so sign-in against it needs the agent's
-documents on public HTTPS.
+`BASE_URL` is `http://localhost`, `http://*.localhost` or `http://127.0.0.1` (`DEV` in
+[`lab.ts`](../lab.ts)), the door accepts `http` client metadata, JWKS and redirect URIs, and
+fetches loopback addresses. That's how the tests and a local run work. On any other `BASE_URL`,
+`http` and private addresses are refused, so an agent signing in at a public proving ground serves
+its documents on public HTTPS (`--public-url`).
 
 ## Not built yet
 
@@ -134,6 +142,6 @@ documents on public HTTPS.
   is ready at once).
 - Handoff and close are minimal: handoff adds a message saying nobody will join, and changes
   nothing else; close adds a `closed` state event.
-- Conversations, Sessions and the client cache are in memory and lost on restart (marked
+- Conversations, Sessions, tokens and the client cache are in memory and lost on restart (marked
   `ponytail:` in the code).
 - Rate limiting (5.6), as for every door.

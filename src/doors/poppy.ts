@@ -4,8 +4,9 @@
  * echoes and, once you sign in, tells you which account you used.
  *
  * Discovery is at /.well-known/poppy.json and /.well-known/oauth-protected-resource.
- * Sign-in is at an external Keycloak (POPPY_ISSUER); the door only verifies
- * its access tokens, and registers each run's client_id there.
+ * The door is its own OAuth issuer (3.2), at ISSUER: it resolves each client_id
+ * as a Client ID Metadata Document, so no agent registers anywhere, and signs
+ * the User in with a test account (no password; nothing here is a real account).
  *
  * An attempt is one Session (client_id + sid). Each request is walked up
  * LADDER; the attempt keeps the highest step it reached. A request stops
@@ -17,7 +18,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { EmbeddedJWK, SignJWT, calculateJwkThumbprint, createRemoteJWKSet, decodeJwt, decodeProtectedHeader, importJWK, jwtVerify, type JWK, type JWTPayload } from 'jose';
+import { SignJWT, calculateJwkThumbprint, decodeJwt, decodeProtectedHeader, importJWK, jwtVerify, type JWK, type JWTPayload } from 'jose';
 import { BASE_URL, DEV, DID, PRIVATE, verifier, type DoorRequest } from '../lab.ts';
 import * as store from '../store.ts';
 
@@ -40,17 +41,18 @@ export const LADDER = [
 type StepName = (typeof LADDER)[number]['name'];
 export const THROUGH = LADDER.length - 1;
 
-// Sign-in: a Keycloak realm. Its admin API registers clients and reports sign-in errors.
-const ISSUER = (process.env.POPPY_ISSUER ?? 'https://idp.agentlab.choosemission.com/realms/protocol-proving-experiments').replace(/\/$/, '');
-const ADMIN = ISSUER.replace(/\/realms\//, '/admin/realms/');
-const TOKEN_ENDPOINT = `${ISSUER}/protocol/openid-connect/token`;
-const ADMIN_CLIENT_ID = process.env.POPPY_ADMIN_CLIENT_ID ?? 'proving-ground-door';
-const ADMIN_CLIENT_SECRET = process.env.POPPY_ADMIN_CLIENT_SECRET;
-const issuerKeys = createRemoteJWKSet(new URL(`${ISSUER}/protocol/openid-connect/certs`));
-
+/** The Company's issuer, and so its identifier (3.2): the door's own URL. Its OAuth endpoints are below it. */
+const ISSUER = `${BASE_URL}/pg/doors/poppy`;
 const SCOPE = 'conversations';
-const ENDPOINT = `${BASE_URL}/pg/doors/poppy/conversations`;
+const SCOPE_TEXT = 'Let the Company Agent see which account you signed in with, in a conversation';
+const ENDPOINT = `${ISSUER}/conversations`;
 const DOMAIN = new URL(BASE_URL).host;
+/** https://{organization.domain}: the protected resource, and what access tokens are for. */
+const RESOURCE = new URL(BASE_URL).origin;
+const ACCESS_TTL_S = 600;
+const REFRESH_TTL_S = 30 * 86_400;
+const CODE_TTL_S = 60;
+const CONSENT_TTL_S = 600;
 const ID = /^[A-Za-z0-9_-]{1,256}$/;
 const IAT_WINDOW_S = 60;
 const CLIENT_CACHE_MS = 5 * 60_000;
@@ -62,12 +64,29 @@ export const WELL_KNOWN = {
     organization: { name: 'Agent Lab proving ground', domain: DOMAIN },
     auth: {
       issuer: ISSUER,
-      scopes: { [SCOPE]: 'Let the Company Agent see which account you signed in with, in a conversation' },
+      scopes: { [SCOPE]: SCOPE_TEXT },
       scope_hints: { [SCOPE]: { changes: 'none', personal_data: false } },
     },
     agent: { protocols: [{ type: 'poppy', endpoint: ENDPOINT }] },
   }),
-  '/.well-known/oauth-protected-resource': () => ({ resource: new URL(BASE_URL).origin, authorization_servers: [ISSUER] }),
+  '/.well-known/oauth-protected-resource': () => ({ resource: RESOURCE, authorization_servers: [ISSUER] }),
+  // RFC 8414 §3.1: the well-known segment goes between the host and the issuer's path.
+  [`/.well-known/oauth-authorization-server${new URL(ISSUER).pathname}`]: () => ({
+    issuer: ISSUER,
+    authorization_endpoint: `${ISSUER}/authorize`,
+    token_endpoint: `${ISSUER}/token`,
+    revocation_endpoint: `${ISSUER}/revoke`,
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    response_types_supported: ['code'],
+    code_challenge_methods_supported: ['S256'],
+    token_endpoint_auth_methods_supported: ['private_key_jwt'],
+    token_endpoint_auth_signing_alg_values_supported: ['ES256', 'PS384'],
+    revocation_endpoint_auth_methods_supported: ['private_key_jwt'],
+    scopes_supported: [SCOPE],
+    authorization_response_iss_parameter_supported: true,
+    client_id_metadata_document_supported: true,
+    protected_resources: [RESOURCE],
+  }),
 };
 
 /** Shown on the wall and served at /pg/state. */
@@ -75,18 +94,22 @@ export const INFO = {
   door: 'poppy',
   spec: { name: 'Personal Agent Protocol', version: '0.3', pinned: 'personal-agent-protocol@6fb46d3', url: SPEC_URL },
   proves: 'A Personal Agent acting for a signed-in User',
-  about: `A Company with a Company Agent at ${ENDPOINT}. Start at /.well-known/poppy.json. Register your client_id with your run; sign in at ${ISSUER} with scope ${SCOPE}.`,
+  about: `A Company with a Company Agent at ${ENDPOINT}. Start at /.well-known/poppy.json. Register your client_id with your run; sign in at the door's own issuer, ${ISSUER}, with scope ${SCOPE}.`,
   builds_on: [
     { name: 'OAuth Client ID Metadata Document (client_id is a URL)', url: 'https://datatracker.ietf.org/doc/draft-ietf-oauth-client-id-metadata-document/' },
     { name: 'RFC 9728, OAuth 2.0 Protected Resource Metadata', url: 'https://www.rfc-editor.org/rfc/rfc9728' },
+    { name: 'RFC 8414, OAuth 2.0 Authorization Server Metadata', url: 'https://www.rfc-editor.org/rfc/rfc8414' },
+    { name: 'RFC 7636, PKCE', url: 'https://www.rfc-editor.org/rfc/rfc7636' },
     { name: 'RFC 7523, private_key_jwt client assertions', url: 'https://www.rfc-editor.org/rfc/rfc7523' },
-    { name: 'RFC 9449, DPoP (htm/htu/ath, and DPoP-bound tokens)', url: 'https://www.rfc-editor.org/rfc/rfc9449' },
+    { name: 'RFC 9207, iss in the authorization response', url: 'https://www.rfc-editor.org/rfc/rfc9207' },
+    { name: 'RFC 7009, token revocation', url: 'https://www.rfc-editor.org/rfc/rfc7009' },
   ],
   ladder: LADDER.map((s) => ({ name: s.name, url: `${SPEC_SITE}#${s.ref}` })),
   issuer: ISSUER,
   endpoint: ENDPOINT,
 };
 
+/** A Buffer body is sent as HTML. */
 type Reply = { status: number; headers: Record<string, string>; body: unknown };
 
 /** Every stop: the step it stops at, and the HTTP status and spec error it answers with. */
@@ -112,7 +135,6 @@ const STOPS = {
   invalid_cursor: ['reply read', 400, 'invalid_cursor'],
   token_invalid: ['signed in', 401, 'invalid_token'],
   token_other_client: ['signed in', 400, 'invalid_session'],
-  dpop_invalid: ['signed in', 401, 'invalid_dpop_proof'],
   session_ended: ['signed in', 400, 'session_ended'],
   account_required: ['authorized call', 401, ''],
 } as const satisfies Record<string, readonly [StepName, number, string]>;
@@ -138,13 +160,14 @@ async function guard<T>(code: Code, fn: () => T | Promise<T>): Promise<T> {
 
 const entry = (text: string, step?: StepName, ok?: boolean): store.Entry => ({ at: new Date().toISOString(), text, step, ok });
 const tail = (s: string) => `…${s.slice(-4)}`;
+const rand = (n = 24) => randomBytes(n).toString('base64url');
 const sha256 = (s: string) => createHash('sha256').update(s).digest('base64url');
 const PRIVATE_MEMBERS = ['d', 'p', 'q', 'dp', 'dq', 'qi', 'k', 'oth'];
 const nowS = () => Math.floor(Date.now() / 1000);
 
 // ---- Clients: client_id is a URL serving client metadata (4.1) ----
 
-type Client = { at: number; meta: { client_id: string; client_name?: string; jwks_uri: string; redirect_uris: string[] }; keys: JWK[]; registered?: string; eventsSince: number };
+type Client = { at: number; meta: { client_id: string; client_name?: string; jwks_uri: string; redirect_uris: string[] }; keys: JWK[] };
 // ponytail: in-memory caches and conversations, lost on restart and unbounded; move to SQLite with a TTL before real traffic.
 const clients = new Map<string, Client>();
 
@@ -154,7 +177,7 @@ const allowedScheme = (u: URL) => u.protocol === 'https:' || (DEV && u.protocol 
 export function clientIdProblem(v: unknown): string | null {
   if (typeof v !== 'string' || v.length > 2048) return 'client_id must be a URL string: the HTTPS URL of your client metadata document.';
   const u = URL.canParse(v) ? new URL(v) : null;
-  if (!u || !allowedScheme(u) || u.hash || u.username) return `client_id must be an HTTPS URL with no fragment${DEV ? ' (http is allowed while BASE_URL is http://localhost)' : ''}.`;
+  if (!u || !allowedScheme(u) || u.hash || u.username) return `client_id must be an HTTPS URL with no fragment${DEV ? ' (http is allowed while BASE_URL is on localhost)' : ''}.`;
   return null;
 }
 
@@ -173,8 +196,11 @@ async function fetchJson(u: string, code: Code, what: string) {
   return guard(code, () => JSON.parse(text));
 }
 
-/** Fetches and checks a client's metadata and keys, and (re)registers it at the issuer when they change. */
-async function resolveClient(clientId: string, log: store.Entry[]): Promise<Client> {
+/** A loopback redirect URI, for an app on the User's computer (RFC 8252 §7.3). */
+const LOOPBACK = /^http:\/\/(127\.0\.0\.1|\[::1\])(:\d+)?\//;
+
+/** Fetches and checks a client's metadata and keys. */
+async function resolveClient(clientId: string): Promise<Client> {
   const cached = clients.get(clientId);
   if (cached && Date.now() - cached.at < CLIENT_CACHE_MS) return cached;
   const code = 'client_metadata_invalid';
@@ -184,9 +210,8 @@ async function resolveClient(clientId: string, log: store.Entry[]): Promise<Clie
   const host = new URL(clientId).hostname.toLowerCase();
   const sameDomain = (u: unknown) => typeof u === 'string' && URL.canParse(u) && allowedScheme(new URL(u)) && new URL(u).hostname.toLowerCase() === host;
   need(sameDomain(meta.jwks_uri), code, `jwks_uri must be an HTTPS URL on ${host}.`);
-  const loopback = (u: string) => /^http:\/\/(127\.0\.0\.1|\[::1\])(:\d+)?\//.test(u);
   need(Array.isArray(meta.redirect_uris) && meta.redirect_uris.length > 0, code, 'redirect_uris must be a non-empty list.');
-  for (const r of meta.redirect_uris) need(sameDomain(r) || loopback(r), code, `Redirect URI ${r} must be an HTTPS URL on ${host}, or a loopback redirect URI.`);
+  for (const r of meta.redirect_uris) need(sameDomain(r) || LOOPBACK.test(r), code, `Redirect URI ${r} must be an HTTPS URL on ${host}, or a loopback redirect URI.`);
   need(meta.token_endpoint_auth_method === 'private_key_jwt', code, `token_endpoint_auth_method must be private_key_jwt; got ${JSON.stringify(meta.token_endpoint_auth_method)}.`);
 
   const jwks = await fetchJson(meta.jwks_uri, 'jwks_invalid', 'jwks_uri');
@@ -194,104 +219,231 @@ async function resolveClient(clientId: string, log: store.Entry[]): Promise<Clie
   need(Array.isArray(keys) && keys.length > 0, 'jwks_invalid', 'jwks_uri must return {"keys": [...]} with at least one key.');
   need(keys.every((k) => PRIVATE_MEMBERS.every((m) => !(m in k))), 'jwks_invalid', 'jwks_uri contains private key members. Publish public keys only, and replace the leaked key.');
 
-  const client: Client = { at: Date.now(), meta, keys, registered: cached?.registered, eventsSince: cached?.eventsSince ?? Date.now() };
-  const shape = JSON.stringify([meta.jwks_uri, meta.redirect_uris, meta.client_name]);
-  if (client.registered !== shape) {
-    try {
-      log.push(entry(await registerAtIssuer(client)));
-      client.registered = shape;
-    } catch (e) {
-      log.push(entry(`Couldn't register the client at the issuer: ${(e as Error).message} Sign-in will fail until it is; signed-out steps still work.`, undefined, false));
-    }
-  }
+  const client: Client = { at: Date.now(), meta, keys };
   clients.set(clientId, client);
   return client;
 }
 
-/** Called when a run is started with a client_id: resolves it now, so sign-in works before the first Session request. */
+/** Called when a run is started with a client_id: checks its metadata now, so problems show before the first request. */
 export async function register(clientId: string) {
-  const log: store.Entry[] = [];
   try {
-    await resolveClient(clientId, log);
-    return { client_metadata: 'valid', issuer: log.map((e) => e.text).join(' ') || 'Already registered.', discovery: `${BASE_URL}/.well-known/poppy.json` };
+    await resolveClient(clientId);
+    return { client_metadata: 'valid', discovery: `${BASE_URL}/.well-known/poppy.json` };
   } catch (e) {
     if (!(e instanceof Stop)) throw e;
-    return { client_metadata: 'invalid', problem: e.message, next: 'Fix it; the door fetches it again on your first Session request, and registers it at the issuer then.' };
+    return { client_metadata: 'invalid', problem: e.message, next: 'Fix it; the door fetches it again on your first Session request, and at sign-in.' };
   }
 }
 
-// ---- The issuer's admin API (Keycloak) ----
+// ---- The door's own authorization server (3.2, 4.1, 4.2, 4.4, 4.6, 4.7) ----
+// No registration: a client is whatever its client_id URL says it is (CIMD). Tokens are opaque
+// strings the door looks up, since the door is also the only resource that accepts them.
 
-let adminToken: { value: string; exp: number } | undefined;
-async function admin(method: string, path: string, body?: unknown) {
-  if (!adminToken || adminToken.exp < Date.now()) {
-    const res = await fetch(TOKEN_ENDPOINT, {
-      method: 'POST',
-      body: new URLSearchParams({ grant_type: 'client_credentials', client_id: ADMIN_CLIENT_ID, client_secret: ADMIN_CLIENT_SECRET! }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) throw new Error(`the door's admin sign-in (${ADMIN_CLIENT_ID}) returned ${res.status}.`);
-    const t = await res.json();
-    adminToken = { value: t.access_token, exp: Date.now() + (t.expires_in - 30) * 1000 };
+type Grant = { client: string; account: string; scope: string; exp: number };
+// ponytail: in-memory, like the conversations; a restart signs everyone out. Move to SQLite with the rest.
+const consents = new Map<string, Omit<Grant, 'account'> & { redirectUri: string; state: string | null; challenge: string }>();
+const codes = new Map<string, Grant & { redirectUri: string; challenge: string }>();
+const refreshTokens = new Map<string, Grant>();
+const accessTokens = new Map<string, Grant & { refresh: string }>();
+
+/** Sets k, dropping expired entries first. */
+// ponytail: O(n) per insert, fine for a test door; a timer or a TTL store if these maps grow large.
+function put<V extends { exp: number }>(m: Map<string, V>, k: string, v: V) {
+  for (const [key, x] of m) if (x.exp < Date.now()) m.delete(key);
+  m.set(k, v);
+}
+const expIn = (s: number) => Date.now() + s * 1000;
+
+class OAuthError extends Error {
+  error: string;
+  status: number;
+  constructor(error: string, message: string, status = 400) {
+    super(message);
+    this.error = error;
+    this.status = status;
   }
-  return fetch(`${ADMIN}${path}`, {
-    method,
-    headers: { authorization: `Bearer ${adminToken.value}`, ...(body !== undefined && { 'content-type': 'application/json' }) },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(5000),
-  });
+}
+function fail(error: string, message: string, status = 400): never {
+  throw new OAuthError(error, message, status);
+}
+function oauth(cond: unknown, error: string, message: string, status = 400): asserts cond {
+  if (!cond) fail(error, message, status);
 }
 
-/** Creates or updates the Keycloak client for a client_id, with the Poppy scope optional. */
-async function registerAtIssuer({ meta }: Client) {
-  if (!ADMIN_CLIENT_SECRET) throw new Error('POPPY_ADMIN_CLIENT_SECRET is not set.');
-  const rep = {
-    clientId: meta.client_id,
-    name: meta.client_name ?? meta.client_id,
-    protocol: 'openid-connect',
-    publicClient: false,
-    clientAuthenticatorType: 'client-jwt',
-    standardFlowEnabled: true,
-    implicitFlowEnabled: false,
-    directAccessGrantsEnabled: false,
-    serviceAccountsEnabled: false,
-    consentRequired: true,
-    redirectUris: meta.redirect_uris,
-    webOrigins: [],
-    attributes: {
-      'use.jwks.url': 'true',
-      'jwks.url': meta.jwks_uri,
-      'token.endpoint.auth.signing.alg': 'ES256',
-      'pkce.code.challenge.method': 'S256',
-      'oauth2.device.authorization.grant.enabled': 'false',
-      'use.refresh.tokens': 'true',
-    },
-  };
-  let res = await admin('POST', '/clients', rep);
-  let id = res.headers.get('location')?.split('/').pop();
-  if (res.status === 409) {
-    id = (await (await admin('GET', `/clients?clientId=${encodeURIComponent(meta.client_id)}`)).json())[0]?.id;
-    res = await admin('PUT', `/clients/${id}`, rep);
-  }
-  if (!res.ok || !id) throw new Error(`the issuer's admin API returned ${res.status}.`);
-  const scope = ((await (await admin('GET', '/client-scopes')).json()) as { id: string; name: string }[]).find((s) => s.name === SCOPE);
-  if (!scope) throw new Error(`the issuer has no client scope named ${SCOPE}.`);
-  const r = await admin('PUT', `/clients/${id}/optional-client-scopes/${scope.id}`);
-  if (!r.ok) throw new Error(`adding scope ${SCOPE} returned ${r.status}.`);
-  return `Registered at the issuer as a private_key_jwt (ES256) client, PKCE S256, with optional scope ${SCOPE}.`;
+/** Sign-in happens on other requests than the conversation; what happened there joins the client's next attempt. */
+const signInNotes = new Map<string, store.Entry[]>();
+function note(clientId: unknown, text: string, ok: boolean) {
+  if (typeof clientId !== 'string' || !store.runByClient(clientId)) return;
+  signInNotes.set(clientId, [...(signInNotes.get(clientId) ?? []).slice(-19), entry(`At the issuer: ${text}`, undefined, ok ? undefined : false)]);
 }
 
-/** Sign-in happens at the issuer, out of the door's sight; its error events fill the gap. Best effort. */
-async function issuerErrors(client: Client): Promise<store.Entry[]> {
-  if (!ADMIN_CLIENT_SECRET) return [];
+const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+/** A sign-in page. It can't be framed, so nobody can trick a click on Allow. */
+const page = (status: number, title: string, text: string, form = ''): Reply => ({
+  status,
+  headers: { 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "frame-ancestors 'none'" },
+  body: Buffer.from(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)}</title><link rel="stylesheet" href="/style.css">
+<main><h1>${esc(title)}</h1><p>${esc(text)}</p>${form}</main>`),
+});
+
+/** Sends the User back to the client, always with iss (RFC 9207). */
+function back(redirectUri: string, state: string | null, params: Record<string, string>): Reply {
+  const u = new URL(redirectUri);
+  for (const [k, v] of Object.entries({ ...params, ...(state !== null && { state }), iss: ISSUER })) u.searchParams.set(k, v);
+  return { status: 302, headers: { Location: u.href, 'Cache-Control': 'no-store' }, body: Buffer.alloc(0) };
+}
+
+/** redirect_uri matches a registered one exactly, or differs only in the port of a loopback URI (4.2). */
+function redirectMatches(registered: string, given: string) {
+  if (registered === given) return true;
+  if (!LOOPBACK.test(registered) || !LOOPBACK.test(given)) return false;
+  const [a, b] = [new URL(registered), new URL(given)];
+  a.port = b.port = '';
+  return a.href === b.href;
+}
+
+/** GET /authorize: Direct Sign-In (4.2) starts here, and shows the consent page. */
+async function authorize(q: URLSearchParams): Promise<Reply> {
+  // Until client_id and redirect_uri check out, errors stay on a page and never redirect (RFC 6749 §4.1.2.1).
+  const clientId = q.get('client_id') ?? '';
+  const refuse = (text: string) => (note(clientId, `sign-in refused: ${text}`, false), page(400, 'Sign-in refused', text));
+  const problem = clientIdProblem(clientId);
+  if (problem) return refuse(`invalid_client: ${problem}`);
+  let client: Client;
   try {
-    const from = new Date(client.eventsSince).toISOString().slice(0, 10);
-    const res = await admin('GET', `/events?client=${encodeURIComponent(client.meta.client_id)}&dateFrom=${from}&max=20`);
-    const events = ((await res.json()) as { time: number; type: string; error?: string }[]).filter((e) => e.type.endsWith('_ERROR') && e.time > client.eventsSince);
-    if (events.length) client.eventsSince = Math.max(...events.map((e) => e.time));
-    return events.sort((a, b) => a.time - b.time).map((e) => ({ at: new Date(e.time).toISOString(), text: `At the issuer: ${e.type}${e.error ? ` (${e.error})` : ''}.`, ok: false }));
+    client = await resolveClient(clientId);
+  } catch (e) {
+    if (!(e instanceof Stop)) throw e;
+    return refuse(`invalid_client: ${e.message}`);
+  }
+  const redirectUri = q.get('redirect_uri') ?? '';
+  if (!client.meta.redirect_uris.some((r) => redirectMatches(r, redirectUri))) return refuse(`redirect_uri ${redirectUri} isn't one of the client's redirect_uris.`);
+
+  const state = q.get('state');
+  const error = (error: string, text: string) => (note(clientId, `${error}: ${text}`, false), back(redirectUri, state, { error, error_description: text }));
+  if (q.get('response_type') !== 'code') return error('unsupported_response_type', 'response_type must be code.');
+  const challenge = q.get('code_challenge') ?? '';
+  if (q.get('code_challenge_method') !== 'S256' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) return error('invalid_request', 'PKCE is required: code_challenge_method S256 and a code_challenge (RFC 7636).');
+  const scopes = [...new Set((q.get('scope') ?? '').split(' ').filter(Boolean))];
+  if (!scopes.length || scopes.some((s) => s !== SCOPE)) return error('invalid_scope', `scope is required, and this Company has one: ${SCOPE} (4.7).`);
+
+  const id = rand();
+  put(consents, id, { client: clientId, scope: scopes.join(' '), redirectUri, state, challenge, exp: expIn(CONSENT_TTL_S) });
+  note(clientId, 'consent page shown.', true);
+  return page(200, 'Sign in to the proving ground', `${new URL(clientId).host} asks to act for you here, with scope ${SCOPE}: ${SCOPE_TEXT}. This is a test sign-in: no password, and nothing here is a real account.`, `
+<form method="post" action="${ISSUER}/authorize">
+<input type="hidden" name="consent" value="${id}">
+<p><label>Test account <input name="account" value="test-user" pattern="[a-z0-9-]{1,31}" required></label></p>
+<p><button name="decision" value="allow">Allow</button> <button name="decision" value="deny" formnovalidate>Deny</button></p>
+</form>`);
+}
+
+/** POST /authorize: the User's click on the consent page. */
+function decide(form: URLSearchParams): Reply {
+  const id = form.get('consent') ?? '';
+  const c = consents.get(id);
+  if (!c || c.exp < Date.now()) return page(400, 'This sign-in expired', 'Start again from your agent.');
+  const allow = form.get('decision') === 'allow';
+  const account = form.get('account') ?? '';
+  if (allow && !/^[a-z0-9-]{1,31}$/.test(account)) return page(400, 'Pick a test account', 'An account name is 1 to 31 lowercase letters, digits and hyphens. Go back and try again.');
+  consents.delete(id);
+  if (!allow) return note(c.client, 'the User declined.', false), back(c.redirectUri, c.state, { error: 'access_denied' });
+  const code = rand();
+  put(codes, code, { client: c.client, account, scope: c.scope, redirectUri: c.redirectUri, challenge: c.challenge, exp: expIn(CODE_TTL_S) });
+  note(c.client, `the User approved ${c.scope} as account ${account}.`, true);
+  return back(c.redirectUri, c.state, { code });
+}
+
+/** private_key_jwt (4.1): the assertion is signed by a jwks_uri key, and addressed to the issuer and nothing else. */
+async function authenticate(form: URLSearchParams): Promise<string> {
+  oauth(form.get('client_assertion_type') === 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', 'invalid_client', 'Authenticate with private_key_jwt: client_assertion_type urn:ietf:params:oauth:client-assertion-type:jwt-bearer and a client_assertion (4.1).', 401);
+  const assertion = form.get('client_assertion') ?? '';
+  let header, claims;
+  try {
+    [header, claims] = [decodeProtectedHeader(assertion), decodeJwt(assertion)];
   } catch {
-    return [];
+    fail('invalid_client', 'client_assertion is not a JWT.', 401);
+  }
+  const clientId = claims.iss;
+  oauth(typeof clientId === 'string' && !clientIdProblem(clientId), 'invalid_client', "The assertion's iss must be your client_id.", 401);
+  oauth(!form.has('client_id') || form.get('client_id') === clientId, 'invalid_client', "client_id must be the assertion's iss.", 401);
+  let client: Client;
+  try {
+    client = await resolveClient(clientId);
+  } catch (e) {
+    if (!(e instanceof Stop)) throw e;
+    fail('invalid_client', e.message, 401);
+  }
+  const key = header.kid ? client.keys.find((k) => k.kid === header.kid) : client.keys.length === 1 ? client.keys[0] : undefined;
+  oauth(key, 'invalid_client', `No key in jwks_uri has kid ${JSON.stringify(header.kid)}.`, 401);
+  try {
+    await jwtVerify(assertion, await importJWK(key, header.alg), { algorithms: ['ES256', 'PS384'], issuer: clientId, subject: clientId, requiredClaims: ['exp', 'iat', 'jti'] });
+  } catch (e) {
+    fail('invalid_client', `The client assertion doesn't verify: ${(e as Error).message}`, 401);
+  }
+  oauth(claims.aud === ISSUER, 'invalid_client', `The assertion's aud must be the issuer, ${ISSUER}, as a single string; got ${JSON.stringify(claims.aud)} (4.1).`, 401);
+  return clientId;
+}
+
+/** POST /token: the authorization code (4.2) or a refresh token (4.4) for tokens (4.7). */
+async function token(form: URLSearchParams): Promise<Reply> {
+  const clientId = await authenticate(form);
+  const issue = (g: Grant, refresh: string, newRefresh: boolean): Reply => {
+    const access = rand(32);
+    put(accessTokens, access, { ...g, refresh, exp: expIn(ACCESS_TTL_S) });
+    note(clientId, `tokens issued for account ${g.account}, scope ${g.scope}.`, true);
+    return { status: 200, headers: { 'Cache-Control': 'no-store' }, body: { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL_S, ...(newRefresh && { refresh_token: refresh }), scope: g.scope } };
+  };
+  const grantType = form.get('grant_type');
+  if (grantType === 'authorization_code') {
+    const code = form.get('code') ?? '';
+    const c = codes.get(code);
+    codes.delete(code);
+    oauth(c && c.exp > Date.now() && c.client === clientId, 'invalid_grant', 'The code is unknown, used, expired, or was issued to another client.');
+    oauth(form.get('redirect_uri') === c.redirectUri, 'invalid_grant', 'redirect_uri must be the one sign-in started with.');
+    oauth(sha256(form.get('code_verifier') ?? '') === c.challenge, 'invalid_grant', "code_verifier doesn't match the code_challenge (S256).");
+    const g = { client: clientId, account: c.account, scope: c.scope, exp: expIn(REFRESH_TTL_S) };
+    const refresh = rand(32);
+    put(refreshTokens, refresh, g);
+    return issue(g, refresh, true);
+  }
+  if (grantType === 'refresh_token') {
+    const refresh = form.get('refresh_token') ?? '';
+    const r = refreshTokens.get(refresh);
+    oauth(r && r.exp > Date.now() && r.client === clientId, 'invalid_grant', 'The refresh token is unknown, expired, revoked, or was issued to another client.');
+    // Fewer scopes may be asked for, never more (4.4). Using it doesn't extend its life, and it isn't rotated.
+    const scope = form.get('scope') ?? r.scope;
+    oauth(scope.split(' ').every((s) => r.scope.split(' ').includes(s)), 'invalid_scope', `This refresh token has scope ${r.scope}.`);
+    return issue({ ...r, scope }, refresh, false);
+  }
+  fail('unsupported_grant_type', 'grant_type must be authorization_code or refresh_token.');
+}
+
+/** POST /revoke (4.6, RFC 7009): a refresh token goes with every access token made from it. */
+async function revoke(form: URLSearchParams): Promise<Reply> {
+  const clientId = await authenticate(form);
+  const t = form.get('token') ?? '';
+  if (refreshTokens.get(t)?.client === clientId) {
+    refreshTokens.delete(t);
+    for (const [k, a] of accessTokens) if (a.refresh === t) accessTokens.delete(k);
+    note(clientId, 'refresh token revoked.', true);
+  }
+  if (accessTokens.get(t)?.client === clientId) accessTokens.delete(t);
+  return { status: 200, headers: { 'Cache-Control': 'no-store' }, body: {} };
+}
+
+async function oauthEndpoint(r: DoorRequest): Promise<Reply> {
+  const form = new URLSearchParams(r.method === 'POST' ? r.body : r.url.search);
+  try {
+    if (r.path === '/authorize') return r.method === 'GET' ? await authorize(form) : decide(form);
+    if (r.method !== 'POST') return { status: 405, headers: { Allow: 'POST' }, body: { error: 'method_not_allowed' } };
+    return r.path === '/token' ? await token(form) : await revoke(form);
+  } catch (e) {
+    if (!(e instanceof OAuthError)) throw e;
+    let clientId: unknown = form.get('client_id');
+    try { clientId ??= decodeJwt(form.get('client_assertion') ?? '').iss; } catch { /* not a JWT */ }
+    note(clientId, `${r.path.slice(1)} refused, ${e.error}: ${e.message}`, false);
+    return { status: e.status, headers: { 'Cache-Control': 'no-store' }, body: { error: e.error, error_description: e.message } };
   }
 }
 
@@ -332,7 +484,7 @@ async function companyReply(c: Conversation, text: unknown, s: Session, handle: 
     .setJti(s.attempt)
     .setIssuedAt()
     .sign(verifier.key);
-  addEvent(c, { message: { id: `msg_${randomBytes(6).toString('base64url')}`, role: 'company', author: { type: 'agent' }, text: `${said}You're signed in, to account ${tail(c.account!)}. That's the door: here's your receipt.`, data: { receipt } } });
+  addEvent(c, { message: { id: `msg_${randomBytes(6).toString('base64url')}`, role: 'company', author: { type: 'agent' }, text: `${said}You're signed in, to account ${c.account}. That's the door: here's your receipt.`, data: { receipt } } });
 }
 
 /** A Poppy message (8.4), or a Stop. */
@@ -365,6 +517,7 @@ const intro = (): Reply => ({
 const ROUTE = /^\/conversations(?:\/([^/]+)\/(messages|events|handoff|close))?$/;
 
 export async function serve(r: DoorRequest): Promise<Reply> {
+  if (['/authorize', '/token', '/revoke'].includes(r.path)) return oauthEndpoint(r);
   const m = ROUTE.exec(r.path);
   if (!m) return r.path === '' && r.method === 'GET' ? intro() : { status: 404, headers: {}, body: { error: 'not_found', message: `The conversation endpoint is ${ENDPOINT}.` } };
   const [, convId, action] = m;
@@ -394,8 +547,10 @@ export async function serve(r: DoorRequest): Promise<Reply> {
     need(typeof clientId === 'string', 'session_malformed', 'The Session JWT has no iss; it must be your client_id.');
     const run = store.runByClient(clientId);
     need(run, 'client_refused', `client_id refused: no run registered ${clientId}. POST {"handle": ..., "client_id": "${clientId}"} to ${BASE_URL}/pg/runs first.`);
-    const client = await resolveClient(clientId, log);
+    const client = await resolveClient(clientId);
     pass('client resolved', `Client ${new URL(clientId).host}: metadata and ${client.keys.length} key(s) fetched and valid.`);
+    log.push(...(signInNotes.get(clientId) ?? []));
+    signInNotes.delete(clientId);
 
     // delegation valid (5.2, in its order)
     const dlg = header.poppy_dlg;
@@ -424,8 +579,7 @@ export async function serve(r: DoorRequest): Promise<Reply> {
     need(s.htm === r.method, 'htu_mismatch', `htm must be ${r.method}.`);
     need(URL.canParse(s.htu as string) && `${new URL(s.htu as string).origin}${new URL(s.htu as string).pathname}` === htu, 'htu_mismatch', `htu must be ${htu}, without query or fragment.`);
     need(Math.abs(nowS() - (s.iat as number)) <= IAT_WINDOW_S, 'iat_out_of_window', `iat must be within ${IAT_WINDOW_S} seconds of now. Sign a fresh Session JWT for each request.`);
-    const auth = /^(Bearer|DPoP) (.+)$/i.exec(String(r.headers.authorization ?? ''));
-    const token = auth?.[2];
+    const token = /^Bearer (.+)$/i.exec(String(r.headers.authorization ?? ''))?.[1];
     need(token ? s.ath === sha256(token) : s.ath === undefined, 'ath_mismatch', token ? 'ath must be the base64url SHA-256 of the access token sent.' : 'ath must be absent when no access token is sent.');
     const key = `${clientId}|${s.sid}`;
     session = sessions.get(key);
@@ -438,25 +592,16 @@ export async function serve(r: DoorRequest): Promise<Reply> {
     pass('session valid', `Session ${tail(s.sid as string)} for User ${tail(s.sub as string)}: signature, aud, htm/htu, iat and ath check out.`);
     const handle = store.handleOf(runId);
 
-    // signed in: an access token from the issuer, issued to this client
+    // signed in: an access token from the door's issuer, issued to this client
     let scoped = false;
     if (token) {
-      const { payload: t } = await guard('token_invalid', () => jwtVerify(token, issuerKeys, { issuer: ISSUER, audience: BASE_URL }));
-      need((t.azp ?? t.client_id) === clientId, 'token_other_client', 'The access token was issued to another client_id. Use a token issued to the Session JWT\'s iss.');
-      const jkt = (t as { cnf?: { jkt?: string } }).cnf?.jkt;
-      if (jkt) {
-        const proof = r.headers.dpop;
-        need(auth![1].toLowerCase() === 'dpop' && typeof proof === 'string', 'dpop_invalid', 'The access token is DPoP-bound: send Authorization: DPoP <token> and a DPoP proof.');
-        const { payload: p, protectedHeader: ph } = await guard('dpop_invalid', () => jwtVerify(proof, EmbeddedJWK, { typ: 'dpop+jwt' }));
-        need((await calculateJwkThumbprint(ph.jwk!)) === jkt, 'dpop_invalid', "The DPoP proof's key isn't the one the token is bound to.");
-        need(p.htm === r.method && p.htu === htu && p.ath === sha256(token) && Math.abs(nowS() - (p.iat ?? 0)) <= IAT_WINDOW_S, 'dpop_invalid', 'The DPoP proof needs this htm and htu, the token\'s ath, and a fresh iat.');
-      }
-      need(!session.account || session.account === t.sub, 'session_ended', 'This Session used another account. Start a new Session (new sid) for this one.');
-      session.account = t.sub!;
-      scoped = String(t.scope ?? '').split(' ').includes(SCOPE);
-      pass('signed in', `Access token from the issuer, issued to this client${jkt ? ', DPoP-bound' : ''}, account ${tail(t.sub!)}${scoped ? '' : `, without scope ${SCOPE}`}.`);
-    } else if (!session.account) {
-      log.push(...(await issuerErrors(client)));
+      const t = accessTokens.get(token);
+      need(t && t.exp > Date.now(), 'token_invalid', 'The access token is unknown, expired or revoked. Refresh it (4.4), or sign in again.');
+      need(t.client === clientId, 'token_other_client', "The access token was issued to another client_id. Use a token issued to the Session JWT's iss.");
+      need(!session.account || session.account === t.account, 'session_ended', 'This Session used another account. Start a new Session (new sid) for this one.');
+      session.account = t.account;
+      scoped = t.scope.split(' ').includes(SCOPE);
+      pass('signed in', `Access token from the issuer, issued to this client, account ${t.account}${scoped ? '' : `, without scope ${SCOPE}`}.`);
     }
 
     // the conversation
@@ -509,7 +654,7 @@ export async function serve(r: DoorRequest): Promise<Reply> {
         body = { conversation_id: conv.id, ...state(conv) };
         accepted.set(idKey, { content, status, body });
         pass('conversation started', `Conversation ${tail(conv.id)} ${convId === undefined ? 'started' : 'continued'} with message ${tail(msg.id)}.`);
-        if (scoped) pass('authorized call', `Signed-in message with scope ${SCOPE}: the conversation now uses account ${tail(session.account!)}.`);
+        if (scoped) pass('authorized call', `Signed-in message with scope ${SCOPE}: the conversation now uses account ${session.account}.`);
       }
       if (wait !== null) body = { ...read(conv!, cursor), ...state(conv!) };
     }
@@ -534,7 +679,7 @@ export async function serve(r: DoorRequest): Promise<Reply> {
     store.finishAttempt(id, { step: Math.max(reached, LADDER.findIndex((s) => s.name === step) - 1), mode: null, error: e.code, reason: e.message, more: log });
     if (session) session.step = Math.max(session.step, reached);
     const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
-    if (status === 401) headers['WWW-Authenticate'] = e.code === 'dpop_invalid' ? 'DPoP error="invalid_dpop_proof"' : e.code === 'token_invalid' ? 'Bearer error="invalid_token"' : `Bearer scope="${SCOPE}"`;
+    if (status === 401) headers['WWW-Authenticate'] = e.code === 'token_invalid' ? 'Bearer error="invalid_token"' : `Bearer scope="${SCOPE}"`;
     return {
       status,
       headers,

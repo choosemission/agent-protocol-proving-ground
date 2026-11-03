@@ -1,129 +1,47 @@
 /**
- * End to end for the poppy door: the real server, driven by poppy-client.ts, one test per stop code.
- * Keycloak is replaced by a minimal stand-in on another port, which also hosts the test agents'
- * client metadata and JWKS. The stand-in issues ES256 tokens like Keycloak's (iss, azp, aud from
- * the audience mapper, scope), takes the door's admin calls, and records sign-in error events.
+ * End to end for the poppy door: the real server, driven by poppy-client.ts, one test per stop code,
+ * and the door's own authorization server. A small server on another port hosts the test agents'
+ * client metadata and JWKS; `browser` plays the User on the door's consent page.
  */
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync } from 'node:fs';
-import { createServer, type IncomingMessage } from 'node:http';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { SignJWT, calculateJwkThumbprint, createLocalJWKSet, exportJWK, generateKeyPair, jwtVerify, type JWK } from 'jose';
-import { call, companySaid, discover, message, newAgent, newSession, sessionJwt, signIn, type Agent, type Company, type Session } from '../poppy-client.ts';
+import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, jwtVerify, type JWK } from 'jose';
+import { call, companySaid, discover, message, newAgent, newSession, refresh, revoke, sessionJwt, signIn, tokenRequest, type Agent, type Company, type Session } from '../poppy-client.ts';
 
-// ---- The stand-in issuer, and the agents' own documents ----
+// ---- The agents' own documents ----
 
-const si = await generateKeyPair('ES256');
-const siJwk = { ...(await exportJWK(si.publicKey)), kid: 'si-1', alg: 'ES256' };
 const agents = new Map<string, { metadata: unknown; jwks: unknown; status?: number }>();
-const kcClients = new Map<string, Record<string, unknown> & { attributes: Record<string, string> }>();
-const optionalScopes: string[] = [];
-const kcEvents: { time: number; type: string; clientId: string; error: string }[] = [];
-const codes = new Map<string, { clientId: string; redirectUri: string; challenge: string; scope: string }>();
-let user = 'user-1';
-
-const standin = createServer(async (req, res) => {
-  const url = new URL(req.url!, ISSUER);
-  const p = url.pathname;
-  const json = (status: number, body?: unknown, headers: Record<string, string> = {}) => {
-    res.writeHead(status, { 'content-type': 'application/json', ...headers });
-    res.end(body === undefined ? undefined : JSON.stringify(body));
-  };
-  const a = /^\/agents\/([^/]+)\/(agent|jwks)\.json$/.exec(p);
-  if (a && agents.has(a[1])) {
-    const ag = agents.get(a[1])!;
-    if (ag.status) return json(ag.status, undefined, { location: `${SI}/elsewhere` });
-    return json(200, a[2] === 'agent' ? ag.metadata : ag.jwks);
-  }
-  if (p === '/.well-known/oauth-authorization-server/realms/test') {
-    return json(200, {
-      issuer: ISSUER, authorization_endpoint: `${OIDC}/auth`, token_endpoint: `${OIDC}/token`, revocation_endpoint: `${OIDC}/revoke`,
-      grant_types_supported: ['authorization_code', 'refresh_token'], protected_resources: [BASE],
-    });
-  }
-  if (p === `/realms/test/protocol/openid-connect/certs`) return json(200, { keys: [siJwk] });
-  if (p === `/realms/test/protocol/openid-connect/auth`) {
-    // The User signs in as `user` and approves at once.
-    const q = url.searchParams;
-    const c = kcClients.get(q.get('client_id')!);
-    if (!c || !(c.redirectUris as string[]).includes(q.get('redirect_uri')!)) return json(400, { error: 'invalid_client' });
-    const code = crypto.randomUUID();
-    codes.set(code, { clientId: q.get('client_id')!, redirectUri: q.get('redirect_uri')!, challenge: q.get('code_challenge')!, scope: q.get('scope')! });
-    return json(302, undefined, { location: `${q.get('redirect_uri')}?${new URLSearchParams({ code, state: q.get('state')!, iss: ISSUER })}` });
-  }
-  if (p === `/realms/test/protocol/openid-connect/token`) {
-    const form = new URLSearchParams(await text(req));
-    if (form.get('grant_type') === 'client_credentials') {
-      return form.get('client_secret') === 'door-secret' && form.get('client_id') === 'proving-ground-door' ? json(200, { access_token: 'admin', expires_in: 300 }) : json(401, { error: 'unauthorized_client' });
-    }
-    const grant = codes.get(form.get('code')!);
-    codes.delete(form.get('code')!);
-    const c = grant && kcClients.get(grant.clientId);
-    try {
-      if (!c || form.get('redirect_uri') !== grant!.redirectUri) throw new Error('invalid_grant');
-      const keys = createLocalJWKSet(await (await fetch(c.attributes['jwks.url'])).json());
-      await jwtVerify(form.get('client_assertion')!, keys, { issuer: grant!.clientId, subject: grant!.clientId, audience: ISSUER });
-      if (sha(form.get('code_verifier')!) !== grant!.challenge) throw new Error('invalid_grant');
-    } catch {
-      kcEvents.push({ time: Date.now(), type: 'CODE_TO_TOKEN_ERROR', clientId: grant?.clientId ?? '', error: 'invalid_client_credentials' });
-      return json(400, { error: 'invalid_client' });
-    }
-    return json(200, { access_token: await mint({ azp: grant!.clientId, scope: grant!.scope }), token_type: 'Bearer', expires_in: 300, refresh_token: 'r', scope: grant!.scope });
-  }
-  // The admin API, as the door uses it.
-  if (p.startsWith('/admin/realms/test/')) {
-    if (req.headers.authorization !== 'Bearer admin') return json(401);
-    const rest = p.slice('/admin/realms/test'.length);
-    if (req.method === 'POST' && rest === '/clients') {
-      const rep = JSON.parse(await text(req));
-      if (kcClients.has(rep.clientId)) return json(409);
-      kcClients.set(rep.clientId, rep);
-      return json(201, undefined, { location: `${SI}/admin/realms/test/clients/${encodeURIComponent(rep.clientId)}` });
-    }
-    if (req.method === 'GET' && rest === '/clients') return json(200, [{ id: encodeURIComponent(url.searchParams.get('clientId')!) }]);
-    if (req.method === 'PUT' && rest.startsWith('/clients/') && !rest.includes('/optional-client-scopes/')) {
-      const rep = JSON.parse(await text(req));
-      kcClients.set(rep.clientId, rep);
-      return json(204);
-    }
-    if (rest === '/client-scopes') return json(200, [{ id: 'scope-1', name: 'conversations' }]);
-    if (req.method === 'PUT' && rest.endsWith('/optional-client-scopes/scope-1')) return optionalScopes.push(rest.split("/")[2]), json(204);
-    if (rest === '/events') return json(200, kcEvents.filter((e) => e.clientId === url.searchParams.get('client')));
-  }
-  json(404);
+const host = createServer((req, res) => {
+  const a = /^\/agents\/([^/]+)\/(agent|jwks)\.json$/.exec(req.url!);
+  const ag = a && agents.get(a[1]);
+  if (!ag) return res.writeHead(404).end();
+  if (ag.status) return res.writeHead(ag.status, { location: `${AGENTS}/elsewhere` }).end();
+  res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(a[2] === 'agent' ? ag.metadata : ag.jwks));
 });
-standin.listen(0);
-await once(standin, 'listening');
-const SI = `http://localhost:${(standin.address() as { port: number }).port}`;
-const ISSUER = `${SI}/realms/test`;
-const OIDC = `${ISSUER}/protocol/openid-connect`;
-
-const text = async (req: IncomingMessage) => { let s = ''; for await (const c of req) s += c; return s; };
-const sha = (s: string) => createHash('sha256').update(s).digest('base64url');
-
-/** An access token as the issuer makes them; `claims` override. */
-const mint = (claims: Record<string, unknown>, key: CryptoKey = si.privateKey) =>
-  new SignJWT({ aud: [BASE, 'account'], sub: user, scope: 'conversations', ...claims }).setProtectedHeader({ alg: 'ES256', kid: 'si-1', typ: 'JWT' })
-    .setIssuer(ISSUER).setIssuedAt().setExpirationTime('5m').setJti(crypto.randomUUID()).sign(key);
+host.listen(0);
+await once(host, 'listening');
+const AGENTS = `http://localhost:${(host.address() as { port: number }).port}`;
 
 // ---- The proving ground ----
 
 const port = 20000 + Math.floor(Math.random() * 20000);
-const BASE = `http://localhost:${port}`;
-Object.assign(process.env, { PORT: String(port), DATA_DIR: mkdtempSync(join(tmpdir(), 'pg-poppy-')), POPPY_ISSUER: ISSUER, POPPY_ADMIN_CLIENT_SECRET: 'door-secret' });
+const BASE = `http://pg.localhost:${port}`;
+const ISSUER = `${BASE}/pg/doors/poppy`;
+Object.assign(process.env, { PORT: String(port), BASE_URL: BASE, DATA_DIR: mkdtempSync(join(tmpdir(), 'pg-poppy-')) });
 const { server } = await import('../src/server.ts');
-after(() => { server.close(); standin.close(); });
+after(() => { server.close(); host.close(); });
 
 let company: Company;
 let n = 0;
 /** A new agent with its documents hosted on the stand-in; registered with a run unless `register` is false. */
 async function newTeam(o: { register?: boolean; metadata?: (m: Record<string, unknown>) => unknown; jwks?: (j: { keys: JWK[] }) => unknown } = {}) {
   const name = `team-${++n}-${Math.random().toString(36).slice(2, 6)}`;
-  const agent = await newAgent(`${SI}/agents/${name}`);
+  const agent = await newAgent(`${AGENTS}/agents/${name}`);
   agents.set(name, { metadata: o.metadata?.(agent.metadata) ?? agent.metadata, jwks: o.jwks?.(agent.jwks) ?? agent.jwks });
   let run;
   if (o.register !== false) {
@@ -139,7 +57,19 @@ before(async () => {
   company = await discover(BASE);
 });
 
-const browser = async (url: string) => (await fetch(url, { redirect: 'manual' })).headers.get('location')!;
+/** The User in a browser: opens the authorization URL, picks Allow or Deny as `account` on the consent page, and returns where they were sent back to. */
+const browser = (account = 'test-user', decision = 'allow') => async (url: string) => {
+  const res = await fetch(url, { redirect: 'manual' });
+  if (res.status === 302) return res.headers.get('location')!;
+  const html = await res.text();
+  const consent = /name="consent" value="([^"]+)"/.exec(html)?.[1];
+  if (!consent) throw new Error(`no consent page (${res.status}): ${html}`);
+  const back = await fetch(`${ISSUER}/authorize`, { method: 'POST', redirect: 'manual', body: new URLSearchParams({ consent, account, decision }) });
+  assert.equal(back.status, 302, await back.clone().text());
+  return back.headers.get('location')!;
+};
+/** Signs the agent in as `account`, and puts the access token on the Session. */
+const signedIn = async (s: Session, account = 'test-user') => (s.token = (await signIn(s.agent, company, 'conversations', browser(account))).access_token);
 
 /** A request with a hand-made Poppy-Session (or none), and extra headers. */
 async function raw(url: string, o: { jwt?: string; method?: string; body?: unknown; headers?: Record<string, string> } = {}) {
@@ -179,20 +109,22 @@ const state = async () => (await (await fetch(`${BASE}/pg/state`)).json()).doors
 test('discovery: poppy.json and the protected resource metadata', async () => {
   const doc = await (await fetch(`${BASE}/.well-known/poppy.json`)).json();
   assert.equal(doc.protocol_version, '0.3');
-  assert.equal(doc.organization.domain, `localhost:${port}`);
+  assert.equal(doc.organization.domain, `pg.localhost:${port}`);
   assert.equal(doc.auth.issuer, ISSUER);
   assert.deepEqual(doc.auth.scope_hints, { conversations: { changes: 'none', personal_data: false } });
   assert.deepEqual(doc.agent.protocols, [{ type: 'poppy', endpoint: `${BASE}/pg/doors/poppy/conversations` }]);
   assert.deepEqual(await (await fetch(`${BASE}/.well-known/oauth-protected-resource`)).json(), { resource: BASE, authorization_servers: [ISSUER] });
+  // The door is its own issuer: discover() has checked issuer and protected_resources (3.2).
+  const as = company.as;
+  assert.deepEqual([as.issuer, as.protected_resources], [ISSUER, [BASE]]);
+  assert.deepEqual(as.grant_types_supported, ['authorization_code', 'refresh_token']);
+  for (const e of ['authorization_endpoint', 'token_endpoint', 'revocation_endpoint']) assert.ok(as[e].startsWith(`${ISSUER}/`), e);
+  assert.equal(as.client_id_metadata_document_supported, true);
 });
 
 test('through: conversation signed out, sign-in at the issuer, signed-in reply with a receipt', async () => {
   const { agent, run, session: s } = await newTeam();
   assert.equal(run.poppy.client_metadata, 'valid', JSON.stringify(run.poppy));
-  const kc = kcClients.get(agent.clientId)!;
-  assert.equal(kc.clientAuthenticatorType, 'client-jwt');
-  assert.equal(kc.attributes['jwks.url'], agent.metadata.jwks_uri);
-  assert.ok(optionalScopes.includes(encodeURIComponent(agent.clientId)));
 
   const started = await call(s, 'POST', company.endpoint, message('Hello'));
   assert.equal(started.status, 201);
@@ -204,7 +136,9 @@ test('through: conversation signed out, sign-in at the issuer, signed-in reply w
   const ask = read.body.events.find((e: { type: string }) => e.type === 'authorization');
   assert.deepEqual([ask.error, ask.scope], ['insufficient_scope', 'conversations']);
 
-  s.token = (await signIn(agent, company, ask.scope, browser)).access_token;
+  const tokens = await signIn(agent, company, ask.scope, browser());
+  assert.deepEqual([tokens.token_type, tokens.scope, typeof tokens.refresh_token], ['Bearer', 'conversations', 'string']);
+  s.token = tokens.access_token;
   const sent = await call(s, 'POST', `${company.endpoint}/${id}/messages?wait=0&cursor=${read.body.cursor}`, message('Signed in now'));
   assert.equal(sent.status, 202);
   const receipt = sent.body.events.find((e: { message?: { data?: { receipt?: string } } }) => e.message?.data?.receipt).message.data.receipt;
@@ -221,21 +155,85 @@ test('through: conversation signed out, sign-in at the issuer, signed-in reply w
   for (const secret of [s.token, s.delegation, 'Signed in now']) assert.ok(!stored.includes(secret.slice(0, 30)), 'stored a secret or message text');
 });
 
-test('a retried message returns the original response; a DPoP-bound token with its proof is accepted', async () => {
+test('a retried message returns the original response', async () => {
   const { session: s } = await newTeam();
   const m = message('once');
   const first = await call(s, 'POST', company.endpoint, m);
   const again = await call(s, 'POST', company.endpoint, m);
   assert.deepEqual(again.body, first.body);
+});
 
-  const dpop = await generateKeyPair('ES256');
-  const jwk = await exportJWK(dpop.publicKey);
-  const token = await mint({ azp: s.agent.clientId, cnf: { jkt: await calculateJwkThumbprint(jwk) } });
-  s.token = token;
-  const url = `${company.endpoint}/${first.body.conversation_id}/events`;
-  const proof = await new SignJWT({ htm: 'GET', htu: url, ath: sha(token), jti: crypto.randomUUID() }).setProtectedHeader({ alg: 'ES256', typ: 'dpop+jwt', jwk }).setIssuedAt().sign(dpop.privateKey);
-  const res = await fetch(url, { headers: { 'Poppy-Session': await sessionJwt(s, 'GET', url), Authorization: `DPoP ${token}`, DPoP: proof } });
-  assert.equal(res.status, 200, await res.clone().text());
+// ---- The door's authorization server ----
+
+/** The authorization URL the client would open, with overrides. */
+function authUrl(agent: Agent, o: Record<string, string> = {}) {
+  const u = new URL(company.as.authorization_endpoint);
+  u.search = new URLSearchParams({ response_type: 'code', client_id: agent.clientId, redirect_uri: (agent.metadata.redirect_uris as string[])[0], scope: 'conversations', state: 'st', code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM', code_challenge_method: 'S256', ...o }).toString();
+  return u.toString();
+}
+
+test('authorize: an unlisted redirect_uri gets a page, never a redirect; other errors redirect with iss', async () => {
+  const { agent } = await newTeam();
+  const page = await fetch(authUrl(agent, { redirect_uri: 'https://evil.example/cb' }), { redirect: 'manual' });
+  assert.deepEqual([page.status, page.headers.get('location')], [400, null]);
+  for (const [o, error] of [[{ scope: 'everything' }, 'invalid_scope'], [{ scope: '' }, 'invalid_scope'], [{ code_challenge_method: 'plain' }, 'invalid_request']] as const) {
+    const back = new URL((await fetch(authUrl(agent, o), { redirect: 'manual' })).headers.get('location')!).searchParams;
+    assert.deepEqual([back.get('error'), back.get('iss'), back.get('state')], [error, ISSUER, 'st']);
+  }
+  const consent = await fetch(authUrl(agent), { redirect: 'manual' });
+  assert.equal(consent.headers.get('x-frame-options'), 'DENY');
+  assert.match(await consent.text(), new RegExp(`${new URL(AGENTS).host} asks to act for you`));
+});
+
+test('authorize: a loopback redirect URI matches on any port', async () => {
+  const { agent } = await newTeam({ metadata: (m) => ({ ...m, redirect_uris: ['http://127.0.0.1/callback'] }) });
+  assert.equal((await fetch(authUrl(agent, { redirect_uri: 'http://127.0.0.1:53111/callback' }), { redirect: 'manual' })).status, 200);
+  assert.equal((await fetch(authUrl(agent, { redirect_uri: 'http://127.0.0.1:53111/other' }), { redirect: 'manual' })).status, 400);
+});
+
+test('a declined sign-in comes back as access_denied, with iss', async () => {
+  const { agent } = await newTeam();
+  await assert.rejects(signIn(agent, company, 'conversations', browser('test-user', 'deny')), /declined: access_denied/);
+});
+
+test('token: the client assertion is addressed to the issuer only, and PKCE is checked', async () => {
+  const { agent } = await newTeam();
+  const back = new URL(await browser()(authUrl(agent))).searchParams;
+  const code = back.get('code')!;
+  const assertion = (aud: unknown) => new SignJWT({ aud } as Record<string, unknown>).setProtectedHeader({ alg: 'ES256', kid: agent.jwks.keys[0].kid })
+    .setIssuer(agent.clientId).setSubject(agent.clientId).setIssuedAt().setExpirationTime('2m').setJti(crypto.randomUUID()).sign(agent.key);
+  const post = async (aud: unknown, verifier = 'x'.repeat(43)) => {
+    const res = await fetch(company.as.token_endpoint, { method: 'POST', body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: (agent.metadata.redirect_uris as string[])[0], code_verifier: verifier, client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: await assertion(aud) }) });
+    return { status: res.status, body: await res.json() };
+  };
+  for (const aud of [company.as.token_endpoint, [ISSUER], `${ISSUER}/`]) {
+    const r = await post(aud);
+    assert.deepEqual([r.status, r.body.error], [401, 'invalid_client'], JSON.stringify(aud));
+  }
+  // The right audience but the wrong verifier: the code is spent either way.
+  const r = await post(ISSUER);
+  assert.deepEqual([r.status, r.body.error], [400, 'invalid_grant']);
+  assert.match(r.body.error_description, /code_verifier/);
+  assert.equal((await post(ISSUER)).body.error, 'invalid_grant');
+});
+
+test('refresh gives a new access token; revoking the refresh token ends both', async () => {
+  const { agent, session: s } = await newTeam();
+  const first = await signIn(agent, company, 'conversations', browser());
+  const again = await refresh(agent, company, first.refresh_token!);
+  assert.deepEqual([again.token_type, again.scope, again.refresh_token], ['Bearer', 'conversations', undefined]);
+  await assert.rejects(refresh(agent, company, first.refresh_token!, 'conversations orders'), /invalid_scope/);
+  s.token = again.access_token;
+  assert.equal((await call(s, 'POST', company.endpoint, message('hi'))).status, 201);
+  assert.deepEqual(await revoke(agent, company, first.refresh_token!), {});
+  await assert.rejects(refresh(agent, company, first.refresh_token!), /invalid_grant/);
+  stopped(await call(s, 'POST', company.endpoint, message('hi')), 401, 'invalid_token', 'token_invalid', 'signed in');
+  // Another client can't use or revoke this client's refresh token.
+  const other = await newTeam();
+  const t = await signIn(agent, company, 'conversations', browser());
+  await assert.rejects(tokenRequest(other.agent, company, company.as.token_endpoint, { grant_type: 'refresh_token', refresh_token: t.refresh_token! }), /invalid_grant/);
+  await revoke(other.agent, company, t.refresh_token!);
+  assert.equal((await refresh(agent, company, t.refresh_token!)).token_type, 'Bearer');
 });
 
 // ---- Every stop ----
@@ -356,7 +354,7 @@ test('invalid_cursor: a cursor from nowhere', async () => {
 
 test('token_invalid: a token the issuer did not sign', async () => {
   const { session: s } = await newTeam();
-  s.token = await mint({ azp: s.agent.clientId }, (await generateKeyPair('ES256')).privateKey);
+  s.token = 'not-a-token-the-door-issued';
   const r = await call(s, 'POST', company.endpoint, message('hi'));
   stopped(r, 401, 'invalid_token', 'token_invalid', 'signed in');
   assert.match(r.headers.get('www-authenticate')!, /error="invalid_token"/);
@@ -364,27 +362,22 @@ test('token_invalid: a token the issuer did not sign', async () => {
 
 test('token_other_client: a token issued to another client_id', async () => {
   const { session: s } = await newTeam();
-  s.token = await mint({ azp: 'https://other.example/agent.json' });
+  const other = await newTeam();
+  s.token = await signedIn(other.session);
   stopped(await call(s, 'POST', company.endpoint, message('hi')), 400, 'invalid_session', 'token_other_client', 'signed in');
-});
-
-test('dpop_invalid: a DPoP-bound token sent as Bearer', async () => {
-  const { session: s } = await newTeam();
-  s.token = await mint({ azp: s.agent.clientId, cnf: { jkt: 'abc' } });
-  stopped(await call(s, 'POST', company.endpoint, message('hi')), 401, 'invalid_dpop_proof', 'dpop_invalid', 'signed in');
 });
 
 test('session_ended: another account in the same Session', async () => {
   const { session: s } = await newTeam();
-  s.token = await mint({ azp: s.agent.clientId });
+  await signedIn(s, 'alice');
   assert.equal((await call(s, 'POST', company.endpoint, message('hi'))).status, 201);
-  s.token = await mint({ azp: s.agent.clientId, sub: 'user-2' });
+  await signedIn(s, 'bob');
   stopped(await call(s, 'POST', company.endpoint, message('hi')), 400, 'session_ended', 'session_ended', 'signed in');
 });
 
 test('account_required: signed out on a conversation that used an account', async () => {
   const { session: s } = await newTeam();
-  s.token = await mint({ azp: s.agent.clientId });
+  await signedIn(s);
   const id = (await call(s, 'POST', company.endpoint, message('hi'))).body.conversation_id;
   s.token = undefined;
   const r = await call(s, 'POST', `${company.endpoint}/${id}/messages`, message('signed out now'));
@@ -397,11 +390,11 @@ test("sign-in errors at the issuer show on the attempt's timeline", async () => 
   const r = await call(s, 'POST', company.endpoint, message('hi'));
   // An assertion signed with a key that isn't in the JWKS: the issuer refuses, out of the door's sight.
   const imposter = { ...agent, key: (await generateKeyPair('ES256')).privateKey };
-  await assert.rejects(signIn(imposter, company, 'conversations', browser), /invalid_client/);
+  await assert.rejects(signIn(imposter, company, 'conversations', browser()), /invalid_client/);
   await call(s, 'GET', `${company.endpoint}/${r.body.conversation_id}/events`);
   const attempt = (await state()).recent.find((a: { handle: string }) => a.handle === name).id;
   const detail = await (await fetch(`${BASE}/pg/attempts/${attempt}`)).json();
-  assert.ok(detail.timeline.some((e: { text: string }) => /At the issuer: CODE_TO_TOKEN_ERROR/.test(e.text)), JSON.stringify(detail.timeline));
+  assert.ok(detail.timeline.some((e: { text: string }) => /At the issuer: token refused, invalid_client/.test(e.text)), JSON.stringify(detail.timeline));
 });
 
 test('the poppy wall, the door intro and the run response', async () => {
