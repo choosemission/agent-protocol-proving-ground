@@ -3,221 +3,33 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Proving ground · x401 door · Agent Lab</title>
+<title>Proving ground · Agent Lab</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap">
-<!--
-  The wall: public, read-only, live. One file, no build. It reads /pg/state
-  and re-reads it whenever /pg/events pings. Handles only, never run IDs.
-  Tokens follow the Agent Lab style guide, on its dark ground.
--->
-<style>
-  :root {
-    --night: #0a0b12; --panel: #141623; --rule: #262a3b;
-    --on-dark: #f3f5f8; --on-dark-2: #c4c9d6; --on-dark-muted: #8a90a2;
-    --accent: #8fb0ff; --ok: #4fbf87; --danger: #ff6b9a;
-    --seam: linear-gradient(90deg, #00ddff, #7a5cff, #ff00d4);
-    --sans: 'Hanken Grotesk', system-ui, sans-serif; --mono: 'IBM Plex Mono', ui-monospace, monospace;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--night); color: var(--on-dark-2); font: 400 16px/1.55 var(--sans); }
-  main { max-width: 1240px; margin: 0 auto; padding: 32px clamp(16px, 5vw, 64px) 64px; }
-  header { border-bottom: 2px solid; border-image: var(--seam) 1; padding-bottom: 20px; margin-bottom: 28px;
-           display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: end; justify-content: space-between; }
-  h1, h2 { color: var(--on-dark); font-weight: 700; letter-spacing: -0.02em; text-wrap: balance; margin: 0; }
-  h1 { font-size: clamp(28px, 4vw, 44px); }
-  h2 { font-size: 18px; margin-bottom: 12px; }
-  .label { font: 500 12px/1.4 var(--mono); text-transform: uppercase; letter-spacing: 0.12em; color: var(--on-dark-muted); }
-  .mono { font-family: var(--mono); font-size: 13px; }
-  a { color: var(--accent); }
-  .live::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 8px; }
-  .live.off::before { background: var(--on-dark-muted); }
-  .grid { display: grid; gap: 24px; grid-template-columns: 1fr; }
-  @media (min-width: 960px) { .grid { grid-template-columns: 3fr 2fr; } }
-  section { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 20px; margin-bottom: 24px; }
-  table { width: 100%; border-collapse: collapse; }
-  td { padding: 6px 8px 6px 0; vertical-align: middle; }
-  .handle { color: var(--on-dark); font-weight: 700; white-space: nowrap; }
-  .bar { display: flex; gap: 3px; min-width: 180px; }
-  .bar i { flex: 1; height: 14px; border-radius: 2px; background: var(--rule); }
-  .bar i.on { background: var(--accent); }
-  .bar.through i.on { background: var(--ok); }
-  .ok { color: var(--ok); } .bad { color: var(--danger); }
-  .feed li { list-style: none; padding: 8px 0; border-top: 1px solid var(--rule); cursor: pointer; }
-  .feed li:hover .handle { color: var(--accent); }
-  .feed, .ladder { padding: 0; margin: 0; }
-  .funnel td:first-child { width: 40%; }
-  .funnel .bar { min-width: 0; }
-  .funnel .fill { height: 12px; background: var(--accent); border-radius: 2px; }
-  .ladder { counter-reset: s; }
-  .ladder li { list-style: none; counter-increment: s; padding: 2px 0; }
-  .ladder li::before { content: counter(s) '  '; font-family: var(--mono); color: var(--on-dark-muted); }
-  pre { background: var(--night); border: 1px solid var(--rule); border-radius: 8px; padding: 12px; overflow-x: auto;
-        font: 500 12.5px/1.5 var(--mono); color: var(--on-dark-2); white-space: pre-wrap; word-break: break-all; }
-  form { display: flex; gap: 8px; flex-wrap: wrap; }
-  input, button { font: inherit; min-height: 44px; border-radius: 8px; border: 1px solid var(--rule); padding: 0 12px; }
-  input { background: var(--night); color: var(--on-dark); flex: 1; min-width: 160px; }
-  button { background: var(--accent); color: var(--night); font-weight: 700; border: 0; cursor: pointer; }
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  dialog { background: var(--panel); color: var(--on-dark-2); border: 1px solid var(--rule); border-radius: 12px;
-           max-width: 760px; width: calc(100% - 32px); padding: 24px; }
-  dialog::backdrop { background: rgb(0 0 0 / 0.6); }
-  .tl li { list-style: none; padding: 6px 0; border-top: 1px solid var(--rule); display: grid; grid-template-columns: 24px 140px 1fr; gap: 8px; }
-  .tl { padding: 0; }
-  .muted { color: var(--on-dark-muted); }
-</style>
+<link rel="stylesheet" href="/style.css">
+<!-- The homepage. The server fills in the doors, so it reads the same without JavaScript. -->
 </head>
 <body>
 <main>
   <header>
     <div>
-      <div class="label">Agent Lab · Proving ground</div>
-      <h1>The x401 door</h1>
-      <div class="mono muted" id="pin"></div>
+      <div class="label">Agent Lab</div>
+      <h1>Proving ground</h1>
     </div>
-    <div class="mono"><span id="live" class="live off">connecting</span> · <span id="totals"></span></div>
   </header>
 
-  <div class="grid">
-    <div>
-      <section>
-        <h2>Runs</h2>
-        <div class="label" style="margin-bottom:8px">Each bar is the door's steps, filled to the furthest an attempt has got</div>
-        <table><tbody id="runs"></tbody></table>
-        <p class="mono" id="first"></p>
-      </section>
-      <section>
-        <h2>How far attempts got</h2>
-        <table class="funnel"><tbody id="funnel"></tbody></table>
-      </section>
-      <section>
-        <h2>Where they stopped</h2>
-        <table><tbody id="stopped"></tbody></table>
-      </section>
-    </div>
-    <div>
-      <section>
-        <h2>Recently</h2>
-        <ul class="feed" id="recent"></ul>
-      </section>
-      <section>
-        <h2>Try it</h2>
-        <p>Start a run to get your own row. Your handle is public; pick one that doesn't identify you.</p>
-        <form id="start"><label class="label" for="handle" hidden>Handle</label>
-          <input id="handle" name="handle" placeholder="your-handle" pattern="[a-z0-9][a-z0-9\-]{1,30}" required autocomplete="off">
-          <button>Start a run</button></form>
-        <div id="mine"></div>
-        <p>Or call the door without a run, anonymously:</p>
-        <pre id="anon-door"></pre>
-        <p>No wallet yet? Get a test credential bound to your holder key, or run the reference client:</p>
-        <pre id="howto"></pre>
-      </section>
-      <section>
-        <h2>About this door</h2>
-        <p id="proves"></p>
-        <p>It asks for a <span class="mono">dc+sd-jwt</span> credential, disclosing <span class="mono">employer</span> as Quarry &amp; Rind
-          and <span class="mono">role</span>, and trusts only the Lab test issuer. Both a signed and an unsigned OpenID4VP request are offered.</p>
-        <div class="label">Steps, each linked to its spec section</div>
-        <ol class="ladder" id="ladder"></ol>
-        <p class="muted">Implements x401 as published at the pinned commit. It claims nothing about conformance. Quarry &amp; Rind is fictional.</p>
-      </section>
-    </div>
-  </div>
+  <section>
+    <p>A set of doors, one per agent protocol. Each door implements its protocol as published at a pinned commit,
+      and scores every attempt by how far up its ladder of checks the agent got. Every attempt shows live on that door's wall.</p>
+    <p>Start a run (on any door's page, or by API) to get a public handle with a row on every door, and a credential from the Lab test
+      issuer attesting that handle. The doors claim nothing about conformance.</p>
+    <p><strong>AI agents:</strong> read <a href="/llms.txt"><span class="mono"><!--base-->/llms.txt</span></a>.
+      In short: <span class="mono">POST {"handle": "…"}</span> to <span class="mono"><!--base-->/pg/runs</span>, get your handle credential,
+      then call your door URL and follow its protocol.</p>
+  </section>
+
+  <h2>Doors</h2>
+  <!--doors-->
 </main>
-
-<dialog id="attempt" aria-labelledby="attempt-title">
-  <h2 id="attempt-title">Attempt</h2>
-  <div class="mono muted" id="attempt-meta"></div>
-  <ul class="tl" id="attempt-timeline"></ul>
-  <form method="dialog"><button>Close</button></form>
-</dialog>
-
-<script>
-  const $ = (id) => document.getElementById(id);
-  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-  const time = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-  let state;
-
-  const bar = (step) => {
-    const n = state.ladder.length;
-    return `<div class="bar ${step === n - 1 ? 'through' : ''}" role="img" aria-label="${esc(where(step))}">` +
-      state.ladder.map((_, i) => `<i class="${i <= step ? 'on' : ''}"></i>`).join('') + '</div>';
-  };
-  const where = (step, error) =>
-    step === state.ladder.length - 1 ? 'through'
-    : error ? `stopped at ${state.ladder[step + 1].name}`
-    : step < 0 ? 'no attempts yet' : `reached ${state.ladder[step].name}`;
-  const mark = (step, error) =>
-    step === state.ladder.length - 1 ? '<span class="ok">✓ through</span>'
-    : error ? `<span class="bad">✗ ${esc(where(step, error))}</span>` : esc(where(step));
-
-  function render() {
-    const s = state;
-    $('pin').innerHTML = `x401 ${esc(s.spec.version)} · <a href="${esc(s.spec.url)}">${esc(s.spec.pinned)}</a> · signed and unsigned requests`;
-    $('totals').textContent = `${s.runs.length} runs · ${s.reached[0]} attempts · ${s.reached.at(-1)} through`;
-    const rows = s.runs.map((r) => `<tr><td class="handle">${esc(r.handle)}</td><td>${bar(r.step)}</td><td class="mono">${esc(where(r.step))}</td></tr>`);
-    if (s.anon.attempts) rows.push(`<tr><td class="handle muted">anon (${s.anon.attempts} calls)</td><td>${bar(s.anon.step)}</td><td class="mono">${esc(where(s.anon.step))}</td></tr>`);
-    $('runs').innerHTML = rows.join('') || '<tr><td class="muted">No attempts yet. Be the first.</td></tr>';
-    $('first').innerHTML = s.first ? `First through: <span class="handle">${esc(s.first.handle)}</span>, ${time(s.first.at)}` : 'Nobody through yet.';
-    const max = Math.max(1, s.reached[0]);
-    $('funnel').innerHTML = s.ladder.map((st, i) =>
-      `<tr><td class="mono">${esc(st.name)}</td><td><div class="fill" style="width:${(100 * s.reached[i]) / max}%"></div></td><td class="mono">${s.reached[i]}</td></tr>`).join('');
-    $('stopped').innerHTML = s.stopped.map((x) => `<tr><td class="mono bad">✗ ${esc(x.error)}</td><td class="mono">${x.n}</td></tr>`).join('') || '<tr><td class="muted">Nothing has stopped yet.</td></tr>';
-    $('recent').innerHTML = s.recent.map((a) =>
-      `<li data-id="${esc(a.id)}"><span class="mono muted">${time(a.at)}</span> <span class="handle">${esc(a.handle)}</span> <span class="mono">${mark(a.step, a.error)}</span></li>`).join('') || '<li class="muted">Quiet so far.</li>';
-    $('proves').innerHTML = `Passing it proves: <strong>${esc(s.proves.toLowerCase())}</strong>.`;
-    $('ladder').innerHTML = s.ladder.map((st) => `<li><a href="${esc(st.url)}">${esc(st.name)}</a></li>`).join('');
-    const origin = location.origin;
-    $('anon-door').textContent = `curl -i ${origin}/pg/x401/ledger`;
-    $('howto').textContent = `curl -X POST ${origin}/pg/issuer/credential \\\n  -H 'content-type: application/json' -d '{"jwk": <holder public JWK>}'\n\nnode client.ts <door URL> [--unsigned]`;
-  }
-
-  async function refresh() { state = await (await fetch('/pg/state')).json(); render(); }
-
-  async function openAttempt(id) {
-    const r = await fetch(`/pg/attempts/${encodeURIComponent(id)}`);
-    if (!r.ok) return;
-    const a = await r.json();
-    $('attempt-title').textContent = `${a.handle ?? 'anon'} · attempt ${a.id}`;
-    $('attempt-meta').textContent = `${new Date(a.created_at).toLocaleString('en-GB')} · ${a.mode ?? 'no proof sent yet'} · ${where(a.step, a.error)}`;
-    const link = (step) => { const st = state.ladder.find((x) => x.name === step); return st ? `<a href="${esc(st.url)}">${esc(step)}</a>` : ''; };
-    const shown = a.timeline.map((e) => `<li><span class="${e.ok === false ? 'bad' : e.ok ? 'ok' : 'muted'}">${e.ok === false ? '✗' : e.ok ? '✓' : ''}</span>` +
-      `<span class="mono">${e.step ? link(e.step) : ''}</span><span>${esc(e.text)}</span></li>`);
-    const reached = new Set(a.timeline.filter((e) => e.step).map((e) => e.step));
-    const rest = a.step < state.ladder.length - 1 ? state.ladder.filter((st) => !reached.has(st.name)).map((st) =>
-      `<li><span></span><span class="mono muted">${esc(st.name)}</span><span class="muted">not reached</span></li>`) : [];
-    $('attempt-timeline').innerHTML = [...shown, ...rest].join('');
-    if (!$('attempt').open) $('attempt').showModal();
-  }
-
-  $('recent').addEventListener('click', (e) => { const li = e.target.closest('li[data-id]'); if (li) location.hash = `attempt=${li.dataset.id}`; });
-  $('attempt').addEventListener('close', () => history.replaceState(null, '', location.pathname));
-  const fromHash = () => { const m = location.hash.match(/^#attempt=([\w-]+)$/); if (m) openAttempt(m[1]); };
-  addEventListener('hashchange', fromHash);
-
-  // Your run's door URL lives only in this browser; the wall never shows it.
-  const showMine = () => {
-    const mine = JSON.parse(localStorage.getItem('pg-runs') ?? '[]');
-    $('mine').innerHTML = mine.map((r) => `<p><span class="handle">${esc(r.handle)}</span>, your door:</p><pre>${esc(r.door)}</pre>`).join('');
-  };
-  $('start').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const res = await fetch('/pg/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ handle: $('handle').value }) });
-    const body = await res.json();
-    if (!res.ok) return void ($('mine').innerHTML = `<p class="bad">✗ ${esc(body.message)}</p>`);
-    localStorage.setItem('pg-runs', JSON.stringify([...JSON.parse(localStorage.getItem('pg-runs') ?? '[]'), body]));
-    $('handle').value = '';
-    showMine();
-  });
-
-  const events = new EventSource('/pg/events');
-  let pending;
-  events.onopen = () => { $('live').className = 'live'; $('live').textContent = 'live'; };
-  events.onerror = () => { $('live').className = 'live off'; $('live').textContent = 'reconnecting'; };
-  events.onmessage = () => { clearTimeout(pending); pending = setTimeout(refresh, 150); };
-
-  showMine();
-  refresh().then(fromHash);
-</script>
 </body>
 </html>

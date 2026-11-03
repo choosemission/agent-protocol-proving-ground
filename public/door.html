@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proving ground · Agent Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap">
+<!--
+  A door's wall, served at /<door>: public, read-only, live. One file, no
+  build. It reads /pg/state and re-reads it whenever /pg/events pings.
+  Handles only, never run IDs.
+-->
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <div class="label"><a href="/">Agent Lab · Proving ground</a></div>
+      <h1 id="title">Proving ground</h1>
+      <nav class="mono" id="doors"></nav>
+      <div class="mono muted" id="pin"></div>
+    </div>
+    <div class="mono"><span id="live" class="live off">connecting</span> · <span id="totals"></span></div>
+  </header>
+
+  <div class="grid">
+    <div>
+      <section>
+        <h2>Runs</h2>
+        <div class="label" style="margin-bottom:8px">Each bar is the door's steps, filled to the furthest an attempt has got</div>
+        <table><tbody id="runs"></tbody></table>
+        <p class="mono" id="first"></p>
+      </section>
+      <section>
+        <h2>How far attempts got</h2>
+        <table class="funnel"><tbody id="funnel"></tbody></table>
+      </section>
+      <section>
+        <h2>Where they stopped</h2>
+        <table><tbody id="stopped"></tbody></table>
+      </section>
+    </div>
+    <div>
+      <section>
+        <h2>Recently</h2>
+        <ul class="feed" id="recent"></ul>
+      </section>
+      <section>
+        <h2>Try it</h2>
+        <p>Start a run to get your own row on every door, and a credential from the Lab issuer attesting your handle. Your handle is public; pick one that doesn't identify you.</p>
+        <form id="start"><label class="label" for="handle" hidden>Handle</label>
+          <input id="handle" name="handle" placeholder="your-handle" pattern="[a-z0-9][a-z0-9\-]{1,30}" required autocomplete="off">
+          <button>Start a run</button></form>
+        <div id="mine"></div>
+        <p>Or call the door without a run, anonymously:</p>
+        <pre id="anon-door"></pre>
+        <p>Get your run's handle credential, bound to your holder key, or run the reference client:</p>
+        <pre id="howto"></pre>
+      </section>
+      <section>
+        <h2>About this door</h2>
+        <p id="proves"></p>
+        <p id="asks"></p>
+        <div class="label">Steps, each linked to its spec section</div>
+        <ol class="ladder" id="ladder"></ol>
+        <p class="muted">Implements the protocol as published at the pinned commit. It claims nothing about conformance.</p>
+      </section>
+    </div>
+  </div>
+</main>
+
+<dialog id="attempt" aria-labelledby="attempt-title">
+  <h2 id="attempt-title">Attempt</h2>
+  <div class="mono muted" id="attempt-meta"></div>
+  <ul class="tl" id="attempt-timeline"></ul>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+  const time = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  let state, doors;
+
+  const bar = (step) => {
+    const n = state.ladder.length;
+    return `<div class="bar ${step === n - 1 ? 'through' : ''}" role="img" aria-label="${esc(where(step))}">` +
+      state.ladder.map((_, i) => `<i class="${i <= step ? 'on' : ''}"></i>`).join('') + '</div>';
+  };
+  const where = (step, error) =>
+    step === state.ladder.length - 1 ? 'through'
+    : error ? `stopped at ${state.ladder[step + 1].name}`
+    : step < 0 ? 'no attempts yet' : `reached ${state.ladder[step].name}`;
+  const mark = (step, error) =>
+    step === state.ladder.length - 1 ? '<span class="ok">✓ through</span>'
+    : error ? `<span class="bad">✗ ${esc(where(step, error))}</span>` : esc(where(step));
+
+  function render() {
+    const s = state;
+    $('title').textContent = `The ${s.door} door`;
+    document.title = `${s.door} door · Proving ground · Agent Lab`;
+    $('doors').innerHTML = 'Doors: ' + doors.map((d) => d.door === s.door ? `<strong>${esc(d.door)}</strong>` : `<a href="/${esc(d.door)}">${esc(d.door)}</a>`).join(' · ');
+    $('pin').innerHTML = `${esc(s.spec.name)} ${esc(s.spec.version)} · <a href="${esc(s.spec.url)}">${esc(s.spec.pinned)}</a>`;
+    $('asks').textContent = s.about;
+    $('totals').textContent = `${s.runs.length} runs · ${s.reached[0]} attempts · ${s.reached.at(-1)} through`;
+    const rows = s.runs.map((r) => `<tr><td class="handle">${esc(r.handle)}</td><td>${bar(r.step)}</td><td class="mono">${esc(where(r.step))}</td></tr>`);
+    if (s.anon.attempts) rows.push(`<tr><td class="handle muted">anon (${s.anon.attempts} calls)</td><td>${bar(s.anon.step)}</td><td class="mono">${esc(where(s.anon.step))}</td></tr>`);
+    $('runs').innerHTML = rows.join('') || '<tr><td class="muted">No attempts yet. Be the first.</td></tr>';
+    $('first').innerHTML = s.first ? `First through: <span class="handle">${esc(s.first.handle)}</span>, ${time(s.first.at)}` : 'Nobody through yet.';
+    const max = Math.max(1, s.reached[0]);
+    $('funnel').innerHTML = s.ladder.map((st, i) =>
+      `<tr><td class="mono">${esc(st.name)}</td><td><div class="fill" style="width:${(100 * s.reached[i]) / max}%"></div></td><td class="mono">${s.reached[i]}</td></tr>`).join('');
+    $('stopped').innerHTML = s.stopped.map((x) => `<tr><td class="mono bad">✗ ${esc(x.error)}</td><td class="mono">${x.n}</td></tr>`).join('') || '<tr><td class="muted">Nothing has stopped yet.</td></tr>';
+    $('recent').innerHTML = s.recent.map((a) =>
+      `<li data-id="${esc(a.id)}"><span class="mono muted">${time(a.at)}</span> <span class="handle">${esc(a.handle)}</span> <span class="mono">${mark(a.step, a.error)}</span></li>`).join('') || '<li class="muted">Quiet so far.</li>';
+    $('proves').innerHTML = `Passing it proves: <strong>${esc(s.proves.toLowerCase())}</strong>.`;
+    $('ladder').innerHTML = s.ladder.map((st) => `<li><a href="${esc(st.url)}">${esc(st.name)}</a></li>`).join('');
+    const origin = location.origin;
+    $('anon-door').textContent = `curl -i ${origin}/pg/doors/${s.door}`;
+    $('howto').textContent = `curl -X POST ${origin}/pg/issuer/credential \\\n  -H 'content-type: application/json' -d '{"jwk": <holder public JWK>, "run": <run ID>}'\n\nnode client.ts <your door URL> [--unsigned]`;
+  }
+
+  async function refresh() {
+    doors = (await (await fetch('/pg/state')).json()).doors;
+    state = doors.find((d) => d.door === location.pathname.slice(1));
+    render();
+  }
+
+  async function openAttempt(id) {
+    const r = await fetch(`/pg/attempts/${encodeURIComponent(id)}`);
+    if (!r.ok) return;
+    const a = await r.json();
+    $('attempt-title').textContent = `${a.handle ?? 'anon'} · attempt ${a.id}`;
+    $('attempt-meta').textContent = `${new Date(a.created_at).toLocaleString('en-GB')} · ${a.mode ?? 'no proof sent yet'} · ${where(a.step, a.error)}`;
+    const link = (step) => { const st = state.ladder.find((x) => x.name === step); return st ? `<a href="${esc(st.url)}">${esc(step)}</a>` : ''; };
+    const shown = a.timeline.map((e) => `<li><span class="${e.ok === false ? 'bad' : e.ok ? 'ok' : 'muted'}">${e.ok === false ? '✗' : e.ok ? '✓' : ''}</span>` +
+      `<span class="mono">${e.step ? link(e.step) : ''}</span><span>${esc(e.text)}</span></li>`);
+    const reached = new Set(a.timeline.filter((e) => e.step).map((e) => e.step));
+    const rest = a.step < state.ladder.length - 1 ? state.ladder.filter((st) => !reached.has(st.name)).map((st) =>
+      `<li><span></span><span class="mono muted">${esc(st.name)}</span><span class="muted">not reached</span></li>`) : [];
+    $('attempt-timeline').innerHTML = [...shown, ...rest].join('');
+    if (!$('attempt').open) $('attempt').showModal();
+  }
+
+  $('recent').addEventListener('click', (e) => { const li = e.target.closest('li[data-id]'); if (li) location.hash = `attempt=${li.dataset.id}`; });
+  $('attempt').addEventListener('close', () => history.replaceState(null, '', location.pathname));
+  const fromHash = () => { const m = location.hash.match(/^#attempt=([\w-]+)$/); if (m) openAttempt(m[1]); };
+  addEventListener('hashchange', fromHash);
+
+  // Your run's door URL lives only in this browser; the wall never shows it.
+  const showMine = () => {
+    const mine = JSON.parse(localStorage.getItem('pg-runs') ?? '[]');
+    $('mine').innerHTML = mine.map((r) => `<p><span class="handle">${esc(r.handle)}</span>, run <span class="mono">${esc(r.run)}</span>, your doors:</p><pre>${esc(Object.entries(r.doors ?? {}).map(([d, u]) => `${d}  ${u}`).join('\n'))}</pre>`).join('');
+  };
+  $('start').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const res = await fetch('/pg/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ handle: $('handle').value }) });
+    const body = await res.json();
+    if (!res.ok) return void ($('mine').innerHTML = `<p class="bad">✗ ${esc(body.message)}</p>`);
+    localStorage.setItem('pg-runs', JSON.stringify([...JSON.parse(localStorage.getItem('pg-runs') ?? '[]'), body]));
+    $('handle').value = '';
+    showMine();
+  });
+
+  const events = new EventSource('/pg/events');
+  let pending;
+  events.onopen = () => { $('live').className = 'live'; $('live').textContent = 'live'; };
+  events.onerror = () => { $('live').className = 'live off'; $('live').textContent = 'reconnecting'; };
+  events.onmessage = () => { clearTimeout(pending); pending = setTimeout(refresh, 150); };
+
+  showMine();
+  refresh().then(fromHash);
+</script>
+</body>
+</html>

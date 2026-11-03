@@ -1,7 +1,7 @@
 /**
- * Who the Lab is on this host: its base URL, the door's did:web, and the two
- * signing keys, the door's (requests and receipts) and the test issuer's
- * (credentials). Keys are made on first start and kept in DATA_DIR, so
+ * Who the Lab is on this host: its base URL, the proving ground's did:web, and
+ * the two signing keys, the verifier's (every door's requests and receipts)
+ * and the test issuer's (credentials). Keys are made on first start and kept in DATA_DIR, so
  * receipts and credentials stay verifiable across restarts.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -13,7 +13,7 @@ export const BASE_URL = (process.env.BASE_URL ?? `http://localhost:${PORT}`).rep
 export const ORIGIN = new URL(BASE_URL).origin;
 export const DATA_DIR = process.env.DATA_DIR ?? 'data';
 
-/** The door's identifier; resolves to `${ORIGIN}/.well-known/did.json`. */
+/** The verifier's identifier, shared by every door; resolves to `${ORIGIN}/.well-known/did.json`. */
 export const DID = `did:web:${encodeURIComponent(new URL(BASE_URL).host)}`;
 export const ISSUER_ID = `${BASE_URL}/pg/issuer`;
 
@@ -29,13 +29,13 @@ async function loadOrCreate(name: string, kid: string) {
   return { kid, jwk, key: (await importJWK({ ...jwk, d }, 'ES256')) as CryptoKey, publicKey: (await importJWK(jwk, 'ES256')) as CryptoKey };
 }
 
-export const door = await loadOrCreate('door', `${DID}#door`);
+export const verifier = await loadOrCreate('verifier', `${DID}#verifier`);
 export const issuer = await loadOrCreate('issuer', `${ISSUER_ID}#key-1`);
 
 export const didDocument = {
   '@context': ['https://www.w3.org/ns/did/v1'],
   id: DID,
-  verificationMethod: [{ id: door.kid, type: 'JsonWebKey2020', controller: DID, publicKeyJwk: door.jwk }],
-  assertionMethod: [door.kid],
-  authentication: [door.kid],
+  verificationMethod: [{ id: verifier.kid, type: 'JsonWebKey2020', controller: DID, publicKeyJwk: verifier.jwk }],
+  assertionMethod: [verifier.kid],
+  authentication: [verifier.kid],
 };

@@ -1,11 +1,11 @@
 /**
- * The x401 door: Quarry & Rind's stock ledger (fictional) behind x401 0.2.0,
- * as published at proof/x401@7e864af.
+ * The x401 door: a resource behind x401 0.2.0, as published at
+ * proof/x401@7e864af, that asks for the Lab's handle credential.
  *
  * A request without proof gets 401 + PROOF-REQUEST. A retry with
  * PROOF-RESPONSE is walked up LADDER one check at a time; the attempt
- * records the highest step it reached. Getting through returns the ledger
- * and a Lab-signed receipt in PROOF-RESULT. Stopping returns PROOF-RESULT
+ * records the highest step it reached. Getting through returns a Lab-signed
+ * receipt in PROOF-RESULT. Stopping returns PROOF-RESULT
  * with an x401 Error Object that names the step and says why.
  *
  * What the agent presents is checked and dropped: no credential, presentation
@@ -15,9 +15,10 @@ import { randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { BlockList } from 'node:net';
 import { SignJWT, decodeJwt, decodeProtectedHeader, importJWK, importX509, jwtVerify, type JWK, type JWTPayload } from 'jose';
-import { BASE_URL, DID, ISSUER_ID, ORIGIN, door, issuer } from './lab.ts';
-import { VCT, digest } from './issuer.ts';
-import * as store from './store.ts';
+import type { IncomingHttpHeaders } from 'node:http';
+import { BASE_URL, DID, ISSUER_ID, ORIGIN, issuer, verifier } from '../lab.ts';
+import { VCT, digest } from '../issuer.ts';
+import * as store from '../store.ts';
 
 const SPEC_URL = 'https://github.com/proof/x401/blob/7e864af97cd8202a5380386f52939d759541977d/spec.md';
 
@@ -37,42 +38,39 @@ type StepName = (typeof LADDER)[number]['name'];
 export const THROUGH = LADDER.length - 1;
 
 const CLIENT_ID = `decentralized_identifier:${DID}`;
-const REQUEST_ID = 'pg-x401-stock-ledger-v1';
-const QUERY_ID = 'quarry_rind_staff';
+const REQUEST_ID = 'pg-x401-v1';
+const QUERY_ID = 'lab_handle';
 const ALGS = ['ES256', 'ES384', 'EdDSA'];
 const NONCE_TTL_S = 300;
 
-/** What the door asks for: a Quarry & Rind staff credential showing employer and role. */
-export const DCQL = {
+/** What the door asks for: a Lab handle credential, disclosing the handle (on a run's URL, that run's handle). */
+const dcql = (handle: string | null) => ({
   credentials: [
     {
       id: QUERY_ID,
       format: 'dc+sd-jwt',
       meta: { vct_values: [VCT] },
-      claims: [{ path: ['employer'], values: ['Quarry & Rind'] }, { path: ['role'] }],
+      claims: [{ path: ['handle'], ...(handle && { values: [handle] }) }],
     },
   ],
-};
+});
 
 /** Shown on the wall and served at /pg/state. */
-export const DOOR = {
+export const INFO = {
   door: 'x401',
   spec: { name: 'x401', version: '0.2.0', pinned: 'proof/x401@7e864af', url: SPEC_URL },
-  proves: 'A fact about the person, attested by an issuer',
+  proves: 'A fact about the holder, attested by an issuer',
+  about: "It asks for the Lab handle credential (dc+sd-jwt), disclosing handle as your run's handle, and trusts only the Lab test issuer. Both a signed and an unsigned OpenID4VP request are offered.",
+  /** The specs the door's requests and responses come from, beyond x401 itself. */
+  builds_on: [
+    { name: 'OpenID4VP 1.0 (requests, DCQL, and the DC API response in Appendix A)', url: 'https://openid.net/specs/openid-4-verifiable-presentations-1_0.html' },
+    { name: 'SD-JWT (disclosures, key binding JWT)', url: 'https://datatracker.ietf.org/doc/draft-ietf-oauth-selective-disclosure-jwt/' },
+    { name: 'SD-JWT VC (dc+sd-jwt)', url: 'https://datatracker.ietf.org/doc/draft-ietf-oauth-sd-jwt-vc/' },
+  ],
   ladder: LADDER.map((s) => ({ name: s.name, url: `${SPEC_URL}#${s.ref}` })),
-  asks: DCQL,
+  asks: dcql('<run handle>'),
   modes: ['openid4vp-v1-signed', 'openid4vp-v1-unsigned'],
   trusts: ISSUER_ID,
-};
-
-const LEDGER = {
-  company: 'Quarry & Rind (fictional)',
-  as_of: '2026-11-03',
-  stock: [
-    { sku: 'QR-CHD-24', item: 'Cave-aged cheddar, 24 months', wheels: 42, location: 'Cellar B' },
-    { sku: 'QR-BLU-08', item: 'Quarry blue, 8 months', wheels: 17, location: 'Cellar A' },
-    { sku: 'QR-WSH-03', item: 'Washed rind, 3 months', wheels: 9, location: 'Ripening room' },
-  ],
 };
 
 type Reply = { status: number; headers: Record<string, string>; body: unknown };
@@ -110,7 +108,9 @@ async function guard<T>(step: StepName, code: string, fn: () => T | Promise<T>):
  * The door itself. `route` is the path as shown in public timelines, with the
  * run ID elided.
  */
-export function x401Door(runId: string | null, route: string, method: string, proofResponse: string | undefined) {
+export function serve(runId: string | null, route: string, method: string, headers: IncomingHttpHeaders) {
+  const proof = headers['proof-response'];
+  const proofResponse = Array.isArray(proof) ? proof.join(',') : proof;
   return proofResponse === undefined ? challenge(runId, route, method) : retry(runId, route, method, proofResponse);
 }
 
@@ -121,16 +121,16 @@ async function challenge(runId: string | null, route: string, method: string): P
     response_type: 'vp_token',
     response_mode: 'dc_api',
     nonce,
-    dcql_query: DCQL,
+    dcql_query: dcql(runId && store.handleOf(runId)),
     client_metadata: { vp_formats_supported: { 'dc+sd-jwt': { 'sd-jwt_alg_values': ALGS, 'kb-jwt_alg_values': ALGS } } },
   };
   // The signed entry: a JAR whose client_id resolves to the door's key via did:web.
   const jar = await new SignJWT({ ...openid4vp, client_id: CLIENT_ID, expected_origins: [ORIGIN] })
-    .setProtectedHeader({ alg: 'ES256', typ: 'oauth-authz-req+jwt', kid: door.kid })
+    .setProtectedHeader({ alg: 'ES256', typ: 'oauth-authz-req+jwt', kid: verifier.kid })
     .setAudience('https://self-issued.me/v2')
     .setIssuedAt()
     .setExpirationTime(exp)
-    .sign(door.key);
+    .sign(verifier.key);
   const payload = {
     scheme: 'x401',
     version: '0.2.0',
@@ -145,6 +145,7 @@ async function challenge(runId: string | null, route: string, method: string): P
     request_id: REQUEST_ID,
   };
   const attempt = store.newAttempt({
+    door: 'x401',
     runId,
     nonce,
     nonceExpires: exp,
@@ -162,9 +163,11 @@ async function challenge(runId: string | null, route: string, method: string): P
       error: 'proof_required',
       message: 'This door wants an x401 proof. Decode the PROOF-REQUEST header (base64url JSON), answer one of its requests, and retry this URL with PROOF-RESPONSE.',
       x401: payload,
-      need_a_credential: `POST {"jwk": <your holder public JWK>} to ${ISSUER_ID}/credential`,
+      ...(!runId && { start_a_run: `POST {"handle": "<your-handle>"} to ${BASE_URL}/pg/runs, then use the x401 door URL it returns.` }),
+      need_a_credential: `POST {"jwk": <your holder public JWK>, "run": <run ID>} to ${ISSUER_ID}/credential`,
+      instructions: `${BASE_URL}/llms.txt`,
       attempt,
-      watch: `${BASE_URL}/#attempt=${attempt}`,
+      watch: `${BASE_URL}/x401#attempt=${attempt}`,
     },
   };
 }
@@ -174,6 +177,7 @@ async function retry(runId: string | null, route: string, method: string, header
   const pass = (step: StepName, text: string) => log.push(entry(text, step, true));
   let attempt: store.Attempt | undefined;
   let mode: string | null = null;
+  let handle = 'anonymous';
 
   try {
     // artifact decoded: one base64url JSON Result Artifact holding a dc+sd-jwt presentation
@@ -186,7 +190,7 @@ async function retry(runId: string | null, route: string, method: string, header
     need(inline !== ('credential_result_uri' in artifact), step, 'invalid_artifact', 'A Result Artifact carries exactly one of credential_result or credential_result_uri.');
     const result = inline ? artifact.credential_result : await dereference(artifact.credential_result_uri);
     mode = result?.protocol ?? null;
-    need(DOOR.modes.includes(mode as string), step, 'invalid_artifact', `credential_result.protocol must be one of ${DOOR.modes.join(', ')}; got ${JSON.stringify(mode)}.`);
+    need(INFO.modes.includes(mode as string), step, 'invalid_artifact', `credential_result.protocol must be one of ${INFO.modes.join(', ')}; got ${JSON.stringify(mode)}.`);
     const data = typeof result.data === 'string' ? await guard(step, 'invalid_artifact', () => JSON.parse(result.data)) : result.data;
     const vp = data?.vp_token?.[QUERY_ID];
     const sdjwt: unknown = Array.isArray(vp) ? vp[0] : vp;
@@ -250,18 +254,20 @@ async function retry(runId: string | null, route: string, method: string, header
 
     // query met: the DCQL query, without keeping what was disclosed
     need(claims.vct === VCT, 'query met', 'query_not_met', `The query asks for vct ${VCT}.`);
-    need(disclosed.employer === 'Quarry & Rind', 'query met', 'query_not_met', 'The query asks for employer, disclosed as Quarry & Rind.');
-    need(typeof disclosed.role === 'string', 'query met', 'query_not_met', 'The query asks for role to be disclosed.');
-    const extra = Object.keys(disclosed).filter((n) => n !== 'employer' && n !== 'role');
-    pass('query met', `employer and role disclosed. ${extra.length ? `Also disclosed, not asked for: ${extra.join(', ')}.` : 'Nothing else disclosed.'}`);
+    need(typeof disclosed.handle === 'string', 'query met', 'query_not_met', 'The query asks for handle to be disclosed.');
+    const runHandle = runId && store.handleOf(runId);
+    need(!runHandle || disclosed.handle === runHandle, 'query met', 'query_not_met', `The query asks for this run's handle, ${runHandle}; the credential attests ${JSON.stringify(disclosed.handle)}.`);
+    const extra = Object.keys(disclosed).filter((n) => n !== 'handle');
+    pass('query met', `handle ${disclosed.handle} disclosed. ${extra.length ? `Also disclosed, not asked for: ${extra.join(', ')}.` : 'Nothing else disclosed.'}`);
+    handle = disclosed.handle as string;
 
     // issuer trusted
     need(iss === ISSUER_ID, 'issuer trusted', 'untrusted_issuer', `This door trusts the Lab test issuer, ${ISSUER_ID}; this credential is from ${iss}.`);
     pass('issuer trusted', 'Issued by the Lab test issuer.');
   } catch (e) {
     if (!(e instanceof Stop)) throw e;
-    const id = attempt?.id ?? store.newAttempt({ runId, nonce: null, nonceExpires: null, step: 0, timeline: [] });
-    const error = { scheme: 'x401', version: '0.2.0', error: e.code, error_description: e.message, error_uri: `${BASE_URL}/#attempt=${id}`, request_id: REQUEST_ID, stopped_at: e.step };
+    const id = attempt?.id ?? store.newAttempt({ door: 'x401', runId, nonce: null, nonceExpires: null, step: 0, timeline: [] });
+    const error = { scheme: 'x401', version: '0.2.0', error: e.code, error_description: e.message, error_uri: `${BASE_URL}/x401#attempt=${id}`, request_id: REQUEST_ID, stopped_at: e.step };
     store.finishAttempt(id, {
       step: LADDER.findIndex((s) => s.name === e.step) - 1,
       mode,
@@ -276,27 +282,26 @@ async function retry(runId: string | null, route: string, method: string, header
     };
   }
 
-  const handle = runId ? store.handleOf(runId) : null;
   const receipt = await new SignJWT({
     door: 'x401',
-    spec: `x401 0.2.0 (${DOOR.spec.pinned})`,
-    resource: `${BASE_URL}/pg/x401/ledger`,
+    spec: `x401 0.2.0 (${INFO.spec.pinned})`,
+    resource: `${BASE_URL}/pg/doors/x401`,
     request_mode: mode,
     steps: LADDER.map((s) => s.name),
-    proves: DOOR.proves,
+    proves: INFO.proves,
     trusted_issuer: ISSUER_ID,
   })
-    .setProtectedHeader({ alg: 'ES256', typ: 'pg-receipt+jwt', kid: door.kid })
+    .setProtectedHeader({ alg: 'ES256', typ: 'pg-receipt+jwt', kid: verifier.kid })
     .setIssuer(DID)
-    .setSubject(handle ?? 'anonymous')
+    .setSubject(handle)
     .setJti(attempt.id)
     .setIssuedAt()
-    .sign(door.key);
-  store.finishAttempt(attempt.id, { step: THROUGH, mode, error: null, reason: null, more: [...log, entry('All checks passed.', 'through', true), entry('← 200 with the stock ledger and a signed receipt in PROOF-RESULT')] });
+    .sign(verifier.key);
+  store.finishAttempt(attempt.id, { step: THROUGH, mode, error: null, reason: null, more: [...log, entry('All checks passed.', 'through', true), entry('← 200 with a signed receipt in PROOF-RESULT')] });
   return {
     status: 200,
     headers: { 'PROOF-RESULT': encode({ scheme: 'x401', version: '0.2.0', result: 'accepted', receipt }), 'Cache-Control': 'no-store' },
-    body: { ledger: LEDGER, receipt, verify_receipt_with: `${BASE_URL}/pg/jwks.json`, attempt: attempt.id, watch: `${BASE_URL}/#attempt=${attempt.id}` },
+    body: { through: true, door: 'x401', handle, receipt, verify_receipt_with: `${BASE_URL}/pg/jwks.json`, attempt: attempt.id, watch: `${BASE_URL}/x401#attempt=${attempt.id}` },
   };
 }
 
@@ -306,7 +311,8 @@ async function retry(runId: string | null, route: string, method: string, header
 // pin the resolved address before deploying next to internal services.
 const PRIVATE = new BlockList();
 for (const [net, bits] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16]] as const) PRIVATE.addSubnet(net, bits, 'ipv4');
-for (const [net, bits] of [['::1', 128], ['::ffff:0:0', 96], ['fc00::', 7], ['fe80::', 10]] as const) PRIVATE.addSubnet(net, bits, 'ipv6');
+// No ::ffff:0:0/96 rule: BlockList checks IPv4-mapped IPv6 against the IPv4 rules, and that rule would match every IPv4 address.
+for (const [net, bits] of [['::1', 128], ['fc00::', 7], ['fe80::', 10]] as const) PRIVATE.addSubnet(net, bits, 'ipv6');
 
 async function dereference(uri: unknown) {
   const step = 'artifact decoded';

@@ -1,14 +1,15 @@
 /**
- * A reference x401 agent and wallet in one file: the e2e test's driver, and
+ * A reference agent and wallet for the x401 door, in one file: the e2e test's driver, and
  * something to read next to the spec. It does the exchange as a relaying
  * agent would:
  *
- *   node client.ts <door-url> [--unsigned]
+ *   node client.ts <run's x401 door URL> [--unsigned]
  *
  * 1. GET the door and decode PROOF-REQUEST.
  * 2. Take the signed entry and check its JAR against the door's did:web key
  *    (or, with --unsigned, the unsigned entry).
- * 3. Get a test credential from the Lab issuer. A real wallet already holds one.
+ * 3. Get the run's handle credential from the Lab issuer, using the run ID in
+ *    the door URL. A real wallet already holds one.
  * 4. Disclose only the claims the DCQL query names, and sign a KB-JWT
  *    binding the presentation to the nonce and the audience.
  * 5. Retry the door with PROOF-RESPONSE and print what came back.
@@ -28,8 +29,8 @@ export async function newHolder() {
   return { key: privateKey, jwk: await exportJWK(publicKey) };
 }
 
-export async function getCredential(origin: string, jwk: unknown): Promise<string> {
-  const res = await fetch(`${origin}/pg/issuer/credential`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jwk }) });
+export async function getCredential(origin: string, jwk: unknown, run: string): Promise<string> {
+  const res = await fetch(`${origin}/pg/issuer/credential`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jwk, run }) });
   if (!res.ok) throw new Error(`issuer said ${res.status}: ${await res.text()}`);
   return (await res.json()).credential;
 }
@@ -64,11 +65,12 @@ export async function present(credential: string, holderKey: CryptoKey, o: { non
 
 /** The PROOF-RESPONSE value: a Result Artifact carrying the result inline. */
 export const resultArtifact = (protocol: string, queryId: string, presentation: string) =>
-  encode({ request_id: 'pg-x401-stock-ledger-v1', credential_result: { protocol, data: { vp_token: { [queryId]: [presentation] } } } });
+  encode({ request_id: 'pg-x401-v1', credential_result: { protocol, data: { vp_token: { [queryId]: [presentation] } } } });
 
 async function main() {
   const doorUrl = process.argv[2];
-  if (!doorUrl) throw new Error('usage: node client.ts <door-url> [--unsigned]');
+  const run = doorUrl && /\/r\/([\w-]+)$/.exec(new URL(doorUrl).pathname)?.[1];
+  if (!run) throw new Error("usage: node client.ts <run's x401 door URL> [--unsigned]  (POST /pg/runs to start a run)");
   const unsigned = process.argv.includes('--unsigned');
   const origin = new URL(doorUrl).origin;
 
@@ -78,7 +80,7 @@ async function main() {
   console.log(`← 401 PROOF-REQUEST; using the ${unsigned ? 'unsigned' : 'signed'} entry, nonce ${request.nonce}`);
 
   const holder = await newHolder();
-  const credential = await getCredential(origin, holder.jwk);
+  const credential = await getCredential(origin, holder.jwk, run);
   const disclose = query.claims.map((c) => c.path[0]);
   const presentation = await present(credential, holder.key, { nonce: request.nonce, aud: unsigned ? `origin:${origin}` : request.client_id!, disclose });
   console.log(`→ retry with PROOF-RESPONSE, disclosing ${disclose.join(', ')}`);

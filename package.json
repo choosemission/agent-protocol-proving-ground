@@ -2,7 +2,7 @@
   "name": "@mission/proving-ground",
   "version": "0.1.0",
   "private": true,
-  "description": "The Agent Lab proving ground: an x401 door to a fictional company's records, and a live results wall.",
+  "description": "The Agent Lab proving ground: one door per agent protocol (x401 first), and a live results wall.",
   "type": "module",
   "engines": {
     "node": ">=22.18"
