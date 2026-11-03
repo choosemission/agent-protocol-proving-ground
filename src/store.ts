@@ -1,7 +1,8 @@
 /**
- * Runs and attempts, in SQLite. A run is one handle across every door. An
- * attempt belongs to one door; it starts when the door challenges
- * (it owns the nonce it was issued) and climbs the ladder on retry.
+ * Runs and attempts, in SQLite. A run is one handle across every door, and
+ * optionally a Personal Agent client_id (the poppy door's link to a run). An
+ * attempt belongs to one door and climbs the ladder. An x401 attempt owns the
+ * nonce it was issued; a poppy attempt is one Session, tracked by the door.
  *
  * Stored per attempt: the run, the highest step reached, the request mode
  * answered, the stop code and reason, and a timeline of the exchange in
@@ -49,22 +50,27 @@ db.exec(`
     updated_at text not null
   );
 `);
+// Added with the poppy door; ALTER can't add a UNIQUE column, so the uniqueness is an index.
+try { db.exec('alter table runs add column client_id text'); } catch { /* already there */ }
+db.exec('create unique index if not exists runs_client_id on runs(client_id)');
 
 /** Fires 'change' after every write, for the wall's live feed. */
 export const bus = new EventEmitter();
 const now = () => new Date().toISOString();
 const id = (bytes: number) => randomBytes(bytes).toString('base64url');
 
-export function createRun(handle: string) {
+export function createRun(handle: string, clientId: string | null = null) {
   const run = { id: id(16), handle, created_at: now() };
-  db.prepare('insert into runs (id, handle, created_at) values (?, ?, ?)').run(run.id, run.handle, run.created_at);
+  db.prepare('insert into runs (id, handle, created_at, client_id) values (?, ?, ?, ?)').run(run.id, run.handle, run.created_at, clientId);
   bus.emit('change');
   return run;
 }
 
 export const runExists = (runId: string) => !!db.prepare('select 1 from runs where id = ?').get(runId);
 export const handleOf = (runId: string) => (db.prepare('select handle from runs where id = ?').get(runId) as { handle: string } | undefined)?.handle ?? null;
-export const handleTaken =(handle: string) => !!db.prepare('select 1 from runs where handle = ?').get(handle);
+export const clientTaken = (clientId: string) => !!db.prepare('select 1 from runs where client_id = ?').get(clientId);
+export const runByClient = (clientId: string) => db.prepare('select id, handle from runs where client_id = ?').get(clientId) as { id: string; handle: string } | undefined;
+export const handleTaken = (handle: string) => !!db.prepare('select 1 from runs where handle = ?').get(handle);
 
 export function newAttempt(a: { door: string; runId: string | null; nonce: string | null; nonceExpires: number | null; step: number; timeline: Entry[] }) {
   const attemptId = id(9);

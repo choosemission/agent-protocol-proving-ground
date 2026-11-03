@@ -5,9 +5,10 @@
  *
  *   GET      /, /<door>                  the homepage, and each door's wall
  *   GET      /llms.txt                   instructions for agents
- *   GET|POST /pg/doors/<door>            a door, anonymous
+ *   GET|POST /pg/doors/<door>[/...]      a door, anonymous, and any paths below it
  *   GET|POST /pg/doors/<door>/r/<run>    a door, on a run's row of the wall
- *   POST     /pg/runs                    start a run: {"handle": "..."}
+ *   GET      /.well-known/...            documents a door claims (WELL_KNOWN), such as poppy.json
+ *   POST     /pg/runs                    start a run: {"handle": "...", "client_id"?: "<Personal Agent client_id>"}
  *   POST     /pg/issuer/credential       get the run's handle credential: {"jwk": <holder public JWK>, "run": <run ID>}
  *   GET      /pg/state, /pg/events       the wall's data, and a ping on every change (SSE)
  *   GET      /pg/attempts/<id>           one attempt's timeline
@@ -21,9 +22,11 @@ import { BASE_URL, DID, PORT, didLogText, didWebDocument, issuer, verifier } fro
 import { issueCredential } from './issuer.ts';
 import * as store from './store.ts';
 import * as x401 from './doors/x401.ts';
+import * as poppy from './doors/poppy.ts';
 
-/** Every door: one protocol each. A door exports INFO, THROUGH and serve(). */
-const DOORS = { x401 };
+/** Every door: one protocol each. A door exports INFO, THROUGH and serve(DoorRequest), and may claim WELL_KNOWN documents. */
+const DOORS = { x401, poppy };
+const WELL_KNOWN: Record<string, () => unknown> = { ...poppy.WELL_KNOWN };
 
 const page = (f: string) => readFileSync(new URL(`../public/${f}`, import.meta.url));
 const HOME = page('index.html').toString();
@@ -81,7 +84,7 @@ run at ${BASE_URL}/pg/doors/<door>, but some need your run's credential.
 
 ${Object.values(DOORS).map((d) => `### ${d.INFO.door}
 
-- Your door: ${BASE_URL}/pg/doors/${d.INFO.door}/r/<run ID>
+- Your door: ${'endpoint' in d.INFO ? `discover it at ${BASE_URL}/.well-known/poppy.json; register your client_id by adding "client_id" to the POST to /pg/runs` : `${BASE_URL}/pg/doors/${d.INFO.door}/r/<run ID>`}
 - Spec: ${d.INFO.spec.name} ${d.INFO.spec.version}, pinned at ${d.INFO.spec.pinned}: ${d.INFO.spec.url}
 - Builds on:${d.INFO.builds_on.map((b) => `\n  - ${b.name}: ${b.url}`).join('')}
 - ${d.INFO.about}
@@ -94,14 +97,14 @@ ${Object.values(DOORS).map((d) => `### ${d.INFO.door}
 - Verifier DID: ${DID}, its log at ${BASE_URL}/.well-known/did.jsonl (a parallel did:web at /.well-known/did.json)
 - Every door's live state: ${BASE_URL}/pg/state
 `;
-const DOOR_PATH = /^\/pg\/doors\/([a-z0-9-]+)(?:\/r\/([A-Za-z0-9_-]{22}))?$/;
+const DOOR_PATH = /^\/pg\/doors\/([a-z0-9-]+)(?:\/r\/([A-Za-z0-9_-]{22}))?(\/.*)?$/;
 
 // Browser-based agents and wallets need to read and send the doors' headers cross-origin.
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST',
-  'Access-Control-Allow-Headers': 'PROOF-RESPONSE, Content-Type',
-  'Access-Control-Expose-Headers': 'PROOF-REQUEST, PROOF-RESULT',
+  'Access-Control-Allow-Headers': 'PROOF-RESPONSE, Content-Type, Poppy-Session, Authorization, DPoP',
+  'Access-Control-Expose-Headers': 'PROOF-REQUEST, PROOF-RESULT, WWW-Authenticate',
 };
 
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -110,7 +113,7 @@ function send(res: ServerResponse, status: number, body: unknown, headers: Recor
   res.end(html ? body : JSON.stringify(body, null, 2));
 }
 
-async function readJson(req: IncomingMessage) {
+async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -118,8 +121,9 @@ async function readJson(req: IncomingMessage) {
     if (size > 16_384) throw new Error('Body over 16 kB.');
     chunks.push(chunk);
   }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+  return Buffer.concat(chunks).toString('utf8');
 }
+const readJson = async (req: IncomingMessage) => JSON.parse((await readBody(req)) || '{}');
 
 // The wall refetches /pg/state on each ping, so the ping carries no data.
 const listeners = new Set<ServerResponse>();
@@ -137,7 +141,8 @@ async function route(req: IncomingMessage, res: ServerResponse) {
   if (door && (m === 'GET' || m === 'POST')) {
     const runId = doorMatch![2] ?? null;
     if (runId && !store.runExists(runId)) return send(res, 404, { error: 'unknown_run', message: `No run with that ID. ${START} to start one.` });
-    const r = await door.serve(runId, `/pg/doors/${doorMatch![1]}${runId ? '/r/…' : ''}`, m, req.headers);
+    const path = doorMatch![3] ?? '';
+    const r = await door.serve({ runId, route: `/pg/doors/${doorMatch![1]}${runId ? '/r/…' : ''}${path}`, method: m, path, url: new URL(req.url ?? '/', BASE_URL), headers: req.headers, body: m === 'POST' ? await readBody(req) : '' });
     return send(res, r.status, r.body, r.headers);
   }
 
@@ -150,6 +155,7 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     if (p === '/pg/jwks.json') return send(res, 200, { keys: [verifier.jwk, issuer.jwk] });
     if (p === '/.well-known/did.jsonl') return send(res, 200, Buffer.from(didLogText), { 'Content-Type': 'text/jsonl; charset=utf-8' });
     if (p === '/.well-known/did.json') return send(res, 200, didWebDocument);
+    if (Object.hasOwn(WELL_KNOWN, p)) return send(res, 200, WELL_KNOWN[p]());
     if (p.startsWith('/pg/attempts/')) {
       const a = store.attemptDetail(p.slice('/pg/attempts/'.length));
       return a ? send(res, 200, a) : send(res, 404, { error: 'unknown_attempt' });
@@ -164,13 +170,17 @@ async function route(req: IncomingMessage, res: ServerResponse) {
   }
 
   if (m === 'POST' && p === '/pg/runs') {
-    const { handle } = await readJson(req);
+    const { handle, client_id } = await readJson(req);
     if (typeof handle !== 'string' || !HANDLE.test(handle)) {
       return send(res, 400, { error: 'invalid_handle', message: 'A handle is 2 to 31 characters: lowercase letters, digits and hyphens. It appears on the public wall.' });
     }
     if (store.handleTaken(handle)) return send(res, 409, { error: 'handle_taken', message: 'That handle is taken; pick another.' });
-    const run = store.createRun(handle);
+    const clientProblem = client_id === undefined ? null : poppy.clientIdProblem(client_id);
+    if (clientProblem) return send(res, 400, { error: 'invalid_client_id', message: clientProblem });
+    if (client_id !== undefined && store.clientTaken(client_id)) return send(res, 409, { error: 'client_id_taken', message: 'Another run has that client_id. Each Personal Agent client_id links to one run.' });
+    const run = store.createRun(handle, client_id ?? null);
     return send(res, 201, {
+      ...(client_id !== undefined && { client_id, poppy: await poppy.register(client_id) }),
       handle,
       run: run.id,
       doors: Object.fromEntries(Object.keys(DOORS).map((d) => [d, `${BASE_URL}/pg/doors/${d}/r/${run.id}`])),

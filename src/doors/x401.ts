@@ -13,10 +13,8 @@
  */
 import { randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { BlockList } from 'node:net';
 import { SignJWT, decodeJwt, decodeProtectedHeader, importJWK, importX509, jwtVerify, type JWK, type JWTPayload } from 'jose';
-import type { IncomingHttpHeaders } from 'node:http';
-import { BASE_URL, DID, ORIGIN, issuer, verifier } from '../lab.ts';
+import { BASE_URL, DID, ORIGIN, PRIVATE, issuer, verifier, type DoorRequest } from '../lab.ts';
 import { VCT, digest } from '../issuer.ts';
 import * as store from '../store.ts';
 
@@ -108,7 +106,8 @@ async function guard<T>(step: StepName, code: string, fn: () => T | Promise<T>):
  * The door itself. `route` is the path as shown in public timelines, with the
  * run ID elided.
  */
-export function serve(runId: string | null, route: string, method: string, headers: IncomingHttpHeaders) {
+export function serve({ runId, route, method, path, headers }: DoorRequest): Reply | Promise<Reply> {
+  if (path) return { status: 404, headers: {}, body: { error: 'not_found' } };
   const proof = headers['proof-response'];
   const proofResponse = Array.isArray(proof) ? proof.join(',') : proof;
   return proofResponse === undefined ? challenge(runId, route, method) : retry(runId, route, method, proofResponse);
@@ -307,14 +306,7 @@ async function retry(runId: string | null, route: string, method: string, header
 }
 
 // A Result Artifact by reference makes the door fetch a URL the caller chose,
-// so private and loopback addresses are refused.
-// ponytail: checks the address once and fetch resolves again, so DNS rebinding can slip past;
-// pin the resolved address before deploying next to internal services.
-const PRIVATE = new BlockList();
-for (const [net, bits] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16]] as const) PRIVATE.addSubnet(net, bits, 'ipv4');
-// No ::ffff:0:0/96 rule: BlockList checks IPv4-mapped IPv6 against the IPv4 rules, and that rule would match every IPv4 address.
-for (const [net, bits] of [['::1', 128], ['fc00::', 7], ['fe80::', 10]] as const) PRIVATE.addSubnet(net, bits, 'ipv6');
-
+// so private and loopback addresses are refused (see PRIVATE in lab.ts).
 async function dereference(uri: unknown) {
   const step = 'artifact decoded';
   const url = await guard(step, 'invalid_reference', () => new URL(String(uri)));

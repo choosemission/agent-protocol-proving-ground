@@ -8,6 +8,8 @@
  */
 import { createPrivateKey, sign } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import type { IncomingHttpHeaders } from 'node:http';
+import { BlockList } from 'node:net';
 import { join } from 'node:path';
 import { exportJWK, generateKeyPair, importJWK, type JWK } from 'jose';
 import {
@@ -21,6 +23,19 @@ export const BASE_URL = (process.env.BASE_URL ?? `http://pg.localhost:${PORT}`).
 export const ORIGIN = new URL(BASE_URL).origin;
 export const DATA_DIR = process.env.DATA_DIR ?? 'data';
 const HOST = new URL(BASE_URL).host;
+/** What the server hands a door. `path` is below the door's URL ('' for the door itself), `url` the full public URL; `route` is the path as public timelines show it, run ID elided. */
+export type DoorRequest = { runId: string | null; route: string; method: string; path: string; url: URL; headers: IncomingHttpHeaders; body: string };
+
+/** The one dev switch: on http://localhost (or *.localhost), doors accept http URLs and loopback addresses that the spec would refuse. */
+export const DEV = /^http:\/\/(([a-z0-9-]+\.)?localhost|127\.0\.0\.1)(:|$)/.test(BASE_URL);
+
+/** Addresses a door never fetches for a URL a caller chose. */
+// ponytail: checked once and fetch resolves again, so DNS rebinding can slip past;
+// pin the resolved address before deploying next to internal services.
+export const PRIVATE = new BlockList();
+for (const [net, bits] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16]] as const) PRIVATE.addSubnet(net, bits, 'ipv4');
+// No ::ffff:0:0/96 rule: BlockList checks IPv4-mapped IPv6 against the IPv4 rules, and that rule would match every IPv4 address.
+for (const [net, bits] of [['::1', 128], ['fc00::', 7], ['fe80::', 10]] as const) PRIVATE.addSubnet(net, bits, 'ipv6');
 
 async function privateJwk(name: string, alg: 'ES256' | 'Ed25519'): Promise<JWK> {
   const file = join(DATA_DIR, `${name}.key.json`);
