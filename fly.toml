@@ -1,0 +1,23 @@
+# Test deploy. The DID lives in DATA_DIR on the volume: lose the volume, lose the DID.
+app = "pg-proving-ground-test"
+primary_region = "lhr"
+
+[env]
+  BASE_URL = "https://pg-proving-ground-test.fly.dev"
+  DATA_DIR = "/data"
+  PORT = "8080"
+
+[mounts]
+  source = "pg_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
