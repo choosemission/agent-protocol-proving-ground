@@ -11,13 +11,13 @@
   build. It reads /pg/state and re-reads it whenever /pg/events pings.
   Handles only, never run IDs.
 -->
-<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="{{root}}/style.css">
 </head>
 <body>
 <main>
   <header>
     <div>
-      <div class="label"><a href="/">Agent Lab · Proving ground</a></div>
+      <div class="label"><a href="{{root}}/">Agent Lab · Proving ground</a></div>
       <h1 id="title">Proving ground</h1>
       <nav class="mono" id="doors"></nav>
       <div class="mono muted" id="pin"></div>
@@ -101,7 +101,7 @@
     const s = state;
     $('title').textContent = `The ${s.door} door`;
     document.title = `${s.door} door · Proving ground · Agent Lab`;
-    $('doors').innerHTML = 'Doors: ' + doors.map((d) => d.door === s.door ? `<strong>${esc(d.door)}</strong>` : `<a href="/${esc(d.door)}">${esc(d.door)}</a>`).join(' · ');
+    $('doors').innerHTML = 'Doors: ' + doors.map((d) => d.door === s.door ? `<strong>${esc(d.door)}</strong>` : `<a href="{{root}}/${esc(d.door)}">${esc(d.door)}</a>`).join(' · ');
     $('pin').innerHTML = `${esc(s.spec.name)} ${esc(s.spec.version)} · <a href="${esc(s.spec.url)}">${esc(s.spec.pinned)}</a>`;
     $('asks').textContent = s.about;
     $('totals').textContent = `${s.runs.length} runs · ${s.reached[0]} attempts · ${s.reached.at(-1)} through`;
@@ -123,13 +123,13 @@
   }
 
   async function refresh() {
-    doors = (await (await fetch('/pg/state')).json()).doors;
-    state = doors.find((d) => d.door === location.pathname.slice(1));
+    doors = (await (await fetch('{{root}}/pg/state')).json()).doors;
+    state = doors.find((d) => d.door === location.pathname.split('/').pop());
     render();
   }
 
   async function openAttempt(id) {
-    const r = await fetch(`/pg/attempts/${encodeURIComponent(id)}`);
+    const r = await fetch(`{{root}}/pg/attempts/${encodeURIComponent(id)}`);
     if (!r.ok) return;
     const a = await r.json();
     $('attempt-title').textContent = `${a.handle ?? 'anon'} · attempt ${a.id}`;
@@ -156,7 +156,7 @@
   };
   $('start').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const res = await fetch('/pg/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ handle: $('handle').value }) });
+    const res = await fetch('{{root}}/pg/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ handle: $('handle').value }) });
     const body = await res.json();
     if (!res.ok) return void ($('mine').innerHTML = `<p class="bad">✗ ${esc(body.message)}</p>`);
     localStorage.setItem('pg-runs', JSON.stringify([...JSON.parse(localStorage.getItem('pg-runs') ?? '[]'), body]));
@@ -164,7 +164,7 @@
     showMine();
   });
 
-  const events = new EventSource('/pg/events');
+  const events = new EventSource('{{root}}/pg/events');
   let pending;
   events.onopen = () => { $('live').className = 'live'; $('live').textContent = 'live'; };
   events.onerror = () => { $('live').className = 'live off'; $('live').textContent = 'reconnecting'; };

@@ -18,8 +18,10 @@ import { challenge, decode, encode, getCredential, newHolder, present, resultArt
 
 const tmp = mkdtempSync(join(tmpdir(), 'pg-'));
 const port = 20000 + Math.floor(Math.random() * 20000);
-const BASE = `http://pg.localhost:${port}`;
-Object.assign(process.env, { PORT: String(port), DATA_DIR: tmp });
+// Under a path, as on the Lab: the DID and /.well-known stay at the origin.
+const ORIGIN = `http://pg.localhost:${port}`;
+const BASE = `${ORIGIN}/proving-ground`;
+Object.assign(process.env, { PORT: String(port), BASE_URL: BASE, DATA_DIR: tmp });
 const { server } = await import('../src/server.ts');
 after(() => server.close());
 
@@ -114,11 +116,11 @@ test('the door\'s client_id is a did:webvh whose served log verifies and names t
   const { signed } = await challenge(door); // resolves did.jsonl with didwebvh-ts and checks the JAR
   const did = signed.client_id!.replace(/^decentralized_identifier:/, '');
   assert.match(did, new RegExp(`^did:webvh:[^:]+:pg\\.localhost%3A${port}$`));
-  const res = await fetch(`${BASE}/.well-known/did.jsonl`);
+  const res = await fetch(`${ORIGIN}/.well-known/did.jsonl`);
   assert.match(res.headers.get('content-type')!, /^text\/jsonl/);
   const genesis = JSON.parse((await res.text()).split('\n')[0]);
   assert.equal(genesis.parameters.portable, true);
-  const web = await (await fetch(`${BASE}/.well-known/did.json`)).json();
+  const web = await (await fetch(`${ORIGIN}/.well-known/did.json`)).json();
   assert.equal(web.id, `did:web:pg.localhost%3A${port}`);
   assert.ok(web.alsoKnownAs.includes(did));
 });
@@ -129,7 +131,7 @@ test('the handle credential is issued by the Lab did:webvh and verifies against 
   const { iss, kid } = labIssuer();
   assert.equal(iss, did); // one DID, verifier and issuer
   assert.equal(kid, `${did}#issuer`);
-  const log = (await (await fetch(`${BASE}/.well-known/did.jsonl`)).text()).trim().split('\n').map((l) => JSON.parse(l));
+  const log = (await (await fetch(`${ORIGIN}/.well-known/did.jsonl`)).text()).trim().split('\n').map((l) => JSON.parse(l));
   const { didDocument } = await resolveDIDFromLog(log, { verifier: defaultVerifier });
   assert.ok(didDocument!.assertionMethod!.includes(kid));
   const vm = didDocument!.verificationMethod!.find((v) => v.id === kid)!;
@@ -286,12 +288,22 @@ test('a by-reference result over http is refused', async () => {
 test('the homepage, the x401 page and the stylesheet are served; unknown pages are not', async () => {
   for (const p of ['/', '/x401', '/style.css']) assert.equal((await fetch(`${BASE}${p}`)).status, 200, p);
   assert.equal((await fetch(`${BASE}/nope`)).status, 404);
+  assert.equal((await fetch(`${ORIGIN}/x401`)).status, 404, 'outside the prefix');
+  assert.equal((await fetch(`${BASE}/.well-known/did.jsonl`)).status, 404, 'the DID is at the origin only');
+  const csp = (await fetch(`${BASE}/x401`)).headers.get('content-security-policy')!;
+  assert.match(csp, /script-src 'sha256-/);
+  assert.doesNotMatch(csp, /script-src[^;]*unsafe-inline/);
+});
+
+test('a caller-chosen fetch refuses a private address at connect time', async () => {
+  const { fetchPublicStrict } = await import('../src/lab.ts');
+  await assert.rejects(fetchPublicStrict(new URL(`${BASE}/`)), (e: Error) => /private address/.test(String((e.cause as Error)?.message)));
 });
 
 test('an agent can find its way in without running JavaScript', async () => {
   const home = await (await fetch(`${BASE}/`)).text();
   assert.match(home, /\/pg\/doors\/x401/);
-  assert.match(home, /\/llms\.txt/);
+  assert.ok(home.includes(`href="/proving-ground/llms.txt"`) && home.includes(`href="/proving-ground/x401"`), 'links carry the prefix');
   const llms = await (await fetch(`${BASE}/llms.txt`)).text();
   for (const s of ['/pg/runs', '/pg/issuer/credential', '/pg/doors/x401/r/<run ID>', 'proof/x401@7e864af']) assert.ok(llms.includes(s), s);
   const anon = await (await fetch(`${BASE}/pg/doors/x401`)).json();

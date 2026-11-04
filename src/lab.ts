@@ -9,9 +9,11 @@
 import { createPrivateKey, sign } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { IncomingHttpHeaders } from 'node:http';
+import { lookup, type LookupAddress } from 'node:dns';
 import { BlockList } from 'node:net';
 import { join } from 'node:path';
 import { exportJWK, generateKeyPair, importJWK, type JWK } from 'jose';
+import { Agent } from 'undici';
 import {
   MultibaseEncoding, createDID, defaultVerifier, generateParallelDidWeb, multibaseEncode, prepareDataForSigning, resolveDIDFromLog,
   type DIDDocument, type DIDLog, type Signer,
@@ -21,6 +23,8 @@ export const PORT = Number(process.env.PORT ?? 8401);
 // did:webvh needs a domain name, so not bare localhost; *.localhost resolves to this machine.
 export const BASE_URL = (process.env.BASE_URL ?? `http://pg.localhost:${PORT}`).replace(/\/$/, '');
 export const ORIGIN = new URL(BASE_URL).origin;
+/** The path the app lives under ('' at the root, e.g. '/proving-ground'). The DID and the documents a door claims at /.well-known stay at the origin. */
+export const PREFIX = new URL(BASE_URL).pathname.replace(/\/$/, '');
 export const DATA_DIR = process.env.DATA_DIR ?? 'data';
 const HOST = new URL(BASE_URL).host;
 /** What the server hands a door. `path` is below the door's URL ('' for the door itself), `url` the full public URL; `route` is the path as public timelines show it, run ID elided. */
@@ -30,12 +34,29 @@ export type DoorRequest = { runId: string | null; route: string; method: string;
 export const DEV = /^http:\/\/(([a-z0-9-]+\.)?localhost|127\.0\.0\.1)(:|$)/.test(BASE_URL);
 
 /** Addresses a door never fetches for a URL a caller chose. */
-// ponytail: checked once and fetch resolves again, so DNS rebinding can slip past;
-// pin the resolved address before deploying next to internal services.
 export const PRIVATE = new BlockList();
 for (const [net, bits] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16]] as const) PRIVATE.addSubnet(net, bits, 'ipv4');
 // No ::ffff:0:0/96 rule: BlockList checks IPv4-mapped IPv6 against the IPv4 rules, and that rule would match every IPv4 address.
 for (const [net, bits] of [['::1', 128], ['fc00::', 7], ['fe80::', 10]] as const) PRIVATE.addSubnet(net, bits, 'ipv6');
+
+const isPrivate = (a: LookupAddress) => PRIVATE.check(a.address, a.family === 6 ? 'ipv6' : 'ipv4');
+/** Checks every address at connect time, so a second DNS answer can't swap a private one in after a door's own check. */
+const PUBLIC_ONLY = new Agent({
+  connect: {
+    lookup: ((host: string, opts: { all?: boolean }, cb: (...a: unknown[]) => void) =>
+      lookup(host, { ...opts, all: true }, (err, addrs) => {
+        if (err) return cb(err);
+        if (addrs.some(isPrivate)) return cb(Object.assign(new Error(`${host} resolves to a private address.`), { code: 'EPRIVATE' }));
+        return opts.all ? cb(null, addrs) : cb(null, addrs[0].address, addrs[0].family);
+      })) as never,
+  },
+});
+// Node's fetch takes an undici dispatcher; RequestInit's type doesn't list it.
+const pinned = (url: URL, init: RequestInit) => fetch(url, { ...init, dispatcher: PUBLIC_ONLY } as RequestInit);
+/** fetch for a URL a caller chose: private addresses refused, except on the dev BASE_URL where the tests serve agents on loopback. */
+export const fetchPublic = (url: URL, init: RequestInit = {}) => (DEV ? fetch(url, init) : pinned(url, init));
+/** Exported for the test that the guard holds. */
+export const fetchPublicStrict = (url: URL) => pinned(url, {});
 
 async function privateJwk(name: string, alg: 'ES256' | 'Ed25519'): Promise<JWK> {
   const file = join(DATA_DIR, `${name}.key.json`);

@@ -30,7 +30,8 @@ const AGENTS = `http://localhost:${(host.address() as { port: number }).port}`;
 // ---- The proving ground ----
 
 const port = 20000 + Math.floor(Math.random() * 20000);
-const BASE = `http://pg.localhost:${port}`;
+const ORIGIN = `http://pg.localhost:${port}`;
+const BASE = `${ORIGIN}/proving-ground`;
 const ISSUER = `${BASE}/pg/doors/poppy`;
 Object.assign(process.env, { PORT: String(port), BASE_URL: BASE, DATA_DIR: mkdtempSync(join(tmpdir(), 'pg-poppy-')) });
 const { server } = await import('../src/server.ts');
@@ -54,7 +55,7 @@ async function newTeam(o: { register?: boolean; metadata?: (m: Record<string, un
 
 before(async () => {
   if (!server.listening) await once(server, 'listening');
-  company = await discover(BASE);
+  company = await discover(ORIGIN);
 });
 
 /** The User in a browser: opens the authorization URL, picks Allow or Deny as `account` on the consent page, and returns where they were sent back to. */
@@ -107,16 +108,16 @@ const state = async () => (await (await fetch(`${BASE}/pg/state`)).json()).doors
 // ---- Through ----
 
 test('discovery: poppy.json and the protected resource metadata', async () => {
-  const doc = await (await fetch(`${BASE}/.well-known/poppy.json`)).json();
+  const doc = await (await fetch(`${ORIGIN}/.well-known/poppy.json`)).json();
   assert.equal(doc.protocol_version, '0.3');
   assert.equal(doc.organization.domain, `pg.localhost:${port}`);
   assert.equal(doc.auth.issuer, ISSUER);
   assert.deepEqual(doc.auth.scope_hints, { conversations: { changes: 'none', personal_data: false } });
   assert.deepEqual(doc.agent.protocols, [{ type: 'poppy', endpoint: `${BASE}/pg/doors/poppy/conversations` }]);
-  assert.deepEqual(await (await fetch(`${BASE}/.well-known/oauth-protected-resource`)).json(), { resource: BASE, authorization_servers: [ISSUER] });
+  assert.deepEqual(await (await fetch(`${ORIGIN}/.well-known/oauth-protected-resource`)).json(), { resource: ORIGIN, authorization_servers: [ISSUER] });
   // The door is its own issuer: discover() has checked issuer and protected_resources (3.2).
   const as = company.as;
-  assert.deepEqual([as.issuer, as.protected_resources], [ISSUER, [BASE]]);
+  assert.deepEqual([as.issuer, as.protected_resources], [ISSUER, [ORIGIN]]);
   assert.deepEqual(as.grant_types_supported, ['authorization_code', 'refresh_token']);
   for (const e of ['authorization_endpoint', 'token_endpoint', 'revocation_endpoint']) assert.ok(as[e].startsWith(`${ISSUER}/`), e);
   assert.equal(as.client_id_metadata_document_supported, true);
@@ -400,7 +401,7 @@ test("sign-in errors at the issuer show on the attempt's timeline", async () => 
 test('the poppy wall, the door intro and the run response', async () => {
   assert.equal((await fetch(`${BASE}/poppy`)).status, 200);
   const intro = await (await fetch(`${BASE}/pg/doors/poppy`)).json();
-  assert.equal(intro.discovery, `${BASE}/.well-known/poppy.json`);
+  assert.equal(intro.discovery, `${ORIGIN}/.well-known/poppy.json`);
   const bad = await fetch(`${BASE}/pg/runs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ handle: 'bad-client', client_id: 'ftp://x' }) });
   assert.equal(bad.status, 400);
   const llms = await (await fetch(`${BASE}/llms.txt`)).text();

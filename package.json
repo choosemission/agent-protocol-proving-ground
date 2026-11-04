@@ -15,7 +15,8 @@
   },
   "dependencies": {
     "didwebvh-ts": "^3.0.0",
-    "jose": "^6.2.15"
+    "jose": "^6.2.15",
+    "undici": "^6.29.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

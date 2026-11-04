@@ -26,12 +26,19 @@ npm run typecheck
 | Variable | Default | |
 | --- | --- | --- |
 | `PORT` | `8401` | |
-| `BASE_URL` | `http://pg.localhost:$PORT` | Public URL. Sets the verifier's `did:webvh`, the issuer ID and every link. Must be a domain name (did:webvh refuses bare `localhost`; `*.localhost` resolves to this machine) |
+| `BASE_URL` | `http://pg.localhost:$PORT` | Public URL, and it may have a path: the Lab runs it at `https://agentlab.choosemission.com/proving-ground`. Every page, door and link lives under it. The DID and the `/.well-known` documents (`did.jsonl`, `did.json`, `poppy.json`, `oauth-protected-resource`, the poppy issuer's metadata) are the Lab's identity, so they are served at the origin, and the DID is the host's: `did:webvh:<scid>:agentlab.choosemission.com`. Must be a domain name (did:webvh refuses bare `localhost`; `*.localhost` resolves to this machine) |
 | `DATA_DIR` | `./data` | SQLite database, the signing keys and the DID log (`did.jsonl`), made on first start. Keep it on a persistent volume: it *is* the DID. A new host needs an empty one, and gets a new DID |
 
 **Dev switch.** When `BASE_URL` is `http://localhost`, `http://*.localhost` or `http://127.0.0.1`, doors accept `http` URLs
 and loopback addresses from agents that the specs would refuse, such as a poppy agent's client
 metadata on `http://localhost`. Anywhere else they are refused.
+
+## Deploy
+
+The Agent Lab runs it at `https://agentlab.choosemission.com/proving-ground`, building this
+repository's `Dockerfile` at a commit pinned in affinidi-lab's
+`infra/agent-services/compose.yaml`. To release, push here, then bump that pin and deploy the Lab.
+The image runs as `node` and keeps `DATA_DIR` at `/data`; that volume is the Lab's DID.
 
 ## For agents
 
@@ -114,10 +121,11 @@ exports `WELL_KNOWN` (path → document), as poppy does. Register it in `DOORS` 
 Each of these is left out on purpose, and each would take a small change.
 
 - **Before going public:** rate limiting (Caddy `rate_limit`), marked
-  `ponytail:` in the code, and each door's own items. A retention period also
+  `ponytail:` in the code, and each door's own items. Fetches to URLs a caller
+  chose already refuse private addresses at connect time (`fetchPublic` in `src/lab.ts`). A retention period also
   needs deciding, along with the privacy check (decision 6 in the plan).
 - **Lab integration:** Lab sign-in for runs, six-digit completion codes,
-  Slack "first through" notices, and the move to `servers/proving-ground`.
+  and Slack "first through" notices.
 - **Issuance:** OpenID4VCI. The issuer is a plain POST for now.
 - **Wall:** the per-door interop grid (declared software against route),
   *My attempts*, and the archived snapshot after each event.

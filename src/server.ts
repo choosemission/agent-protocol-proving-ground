@@ -3,6 +3,9 @@
  * issuer, runs, and the public wall with its live feed. Every route is in
  * `route` below.
  *
+ * Every path is below PREFIX (from BASE_URL, e.g. /proving-ground) except the
+ * /.well-known documents, which are the Lab's identity and sit at the origin.
+ *
  *   GET      /, /<door>                  the homepage, and each door's wall
  *   GET      /llms.txt                   instructions for agents
  *   GET|POST /pg/doors/<door>[/...]      a door, anonymous, and any paths below it
@@ -16,9 +19,10 @@
  *   GET      /.well-known/did.jsonl      the verifier's did:webvh log (every door's client_id)
  *   GET      /.well-known/did.json       the same DID as a parallel did:web
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { BASE_URL, DID, PORT, didLogText, didWebDocument, issuer, verifier } from './lab.ts';
+import { BASE_URL, DID, ORIGIN, PORT, PREFIX, didLogText, didWebDocument, issuer, verifier } from './lab.ts';
 import { issueCredential } from './issuer.ts';
 import * as store from './store.ts';
 import * as x401 from './doors/x401.ts';
@@ -28,9 +32,13 @@ import * as poppy from './doors/poppy.ts';
 const DOORS = { x401, poppy };
 const WELL_KNOWN: Record<string, () => unknown> = { ...poppy.WELL_KNOWN };
 
-const page = (f: string) => readFileSync(new URL(`../public/${f}`, import.meta.url));
-const HOME = page('index.html').toString();
-const DOOR_PAGE = page('door.html');
+const page = (f: string) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8').replaceAll('{{root}}', PREFIX);
+const HOME = page('index.html');
+const DOOR_PAGE = Buffer.from(page('door.html'));
+// The pages share an origin with the Lab's signed-in site, so only their own inline script may run.
+const scriptHashes = [HOME, DOOR_PAGE.toString()].flatMap((h) => [...h.matchAll(/<script>([\s\S]*?)<\/script>/g)])
+  .map(([, js]) => `'sha256-${createHash('sha256').update(js).digest('base64')}'`);
+const CSP = `default-src 'self'; script-src ${scriptHashes.join(' ') || "'none'"}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`;
 const CSS = page('style.css');
 const HANDLE = /^[a-z0-9][a-z0-9-]{1,30}$/;
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -41,7 +49,7 @@ const home = () =>
   HOME.replace('<!--doors-->', () => Object.values(DOORS).map((d) => {
     const w = store.wallState(d.INFO.door, d.THROUGH);
     return `<section>
-      <h2><a href="/${esc(d.INFO.door)}">The ${esc(d.INFO.door)} door</a></h2>
+      <h2><a href="${PREFIX}/${esc(d.INFO.door)}">The ${esc(d.INFO.door)} door</a></h2>
       <div class="mono muted">${esc(d.INFO.spec.name)} ${esc(d.INFO.spec.version)} · <a href="${esc(d.INFO.spec.url)}">${esc(d.INFO.spec.pinned)}</a> · <span class="mono">${BASE_URL}/pg/doors/${esc(d.INFO.door)}</span></div>
       <p>Passing it proves: <strong>${esc(d.INFO.proves.toLowerCase())}</strong>. ${esc(d.INFO.about)}</p>
       <div class="mono">${w.reached[0]} attempts · ${w.reached[d.THROUGH]} through · ${w.first ? `first through: <span class="handle">${esc((w.first as { handle: string }).handle)}</span>` : 'nobody through yet'}</div>
@@ -75,7 +83,7 @@ The Lab test issuer returns {"format": "dc+sd-jwt", "credential": "<sd-jwt>",
 "issuer": "${DID}"}: an SD-JWT VC attesting your run's handle, bound to
 your key, with handle selectively disclosable. Doors that
 ask for a credential ask for this one. The issuer is the Lab's did:webvh; its
-signing key is ${issuer.kid}, in the DID log at ${BASE_URL}/.well-known/did.jsonl
+signing key is ${issuer.kid}, in the DID log at ${ORIGIN}/.well-known/did.jsonl
 
 ## 3. Go through a door
 
@@ -84,7 +92,7 @@ run at ${BASE_URL}/pg/doors/<door>, but some need your run's credential.
 
 ${Object.values(DOORS).map((d) => `### ${d.INFO.door}
 
-- Your door: ${'endpoint' in d.INFO ? `discover it at ${BASE_URL}/.well-known/poppy.json; register your client_id by adding "client_id" to the POST to /pg/runs` : `${BASE_URL}/pg/doors/${d.INFO.door}/r/<run ID>`}
+- Your door: ${'endpoint' in d.INFO ? `discover it at ${ORIGIN}/.well-known/poppy.json; register your client_id by adding "client_id" to the POST to ${BASE_URL}/pg/runs` : `${BASE_URL}/pg/doors/${d.INFO.door}/r/<run ID>`}
 - Spec: ${d.INFO.spec.name} ${d.INFO.spec.version}, pinned at ${d.INFO.spec.pinned}: ${d.INFO.spec.url}
 - Builds on:${d.INFO.builds_on.map((b) => `\n  - ${b.name}: ${b.url}`).join('')}
 - ${d.INFO.about}
@@ -94,7 +102,7 @@ ${Object.values(DOORS).map((d) => `### ${d.INFO.door}
 ## Keys and state
 
 - Verifier and issuer keys: ${BASE_URL}/pg/jwks.json (verify receipts here)
-- Verifier DID: ${DID}, its log at ${BASE_URL}/.well-known/did.jsonl (a parallel did:web at /.well-known/did.json)
+- Verifier DID: ${DID}, its log at ${ORIGIN}/.well-known/did.jsonl (a parallel did:web at ${ORIGIN}/.well-known/did.json)
 - Every door's live state: ${BASE_URL}/pg/state
 `;
 const DOOR_PATH = /^\/pg\/doors\/([a-z0-9-]+)(?:\/r\/([A-Za-z0-9_-]{22}))?(\/.*)?$/;
@@ -109,7 +117,7 @@ const CORS = {
 
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
   const html = Buffer.isBuffer(body);
-  res.writeHead(status, { ...CORS, 'Content-Type': html ? 'text/html; charset=utf-8' : 'application/json', ...headers });
+  res.writeHead(status, { ...CORS, 'Content-Type': html ? 'text/html; charset=utf-8' : 'application/json', ...(html && { 'Content-Security-Policy': CSP }), ...headers });
   res.end(html ? body : JSON.stringify(body, null, 2));
 }
 
@@ -132,9 +140,18 @@ setInterval(() => listeners.forEach((r) => r.write(': keepalive\n\n')), 25_000).
 
 // ponytail: no rate limiting; put the door behind Caddy's rate_limit (or add a token bucket here) before it is public.
 async function route(req: IncomingMessage, res: ServerResponse) {
-  const { pathname: p } = new URL(req.url ?? '/', BASE_URL);
+  const { pathname: full } = new URL(req.url ?? '/', BASE_URL);
   const m = req.method;
   if (m === 'OPTIONS') return send(res, 204, Buffer.alloc(0));
+
+  // The Lab's identity, at the origin whatever PREFIX is.
+  if (m === 'GET') {
+    if (full === '/.well-known/did.jsonl') return send(res, 200, Buffer.from(didLogText), { 'Content-Type': 'text/jsonl; charset=utf-8' });
+    if (full === '/.well-known/did.json') return send(res, 200, didWebDocument);
+    if (Object.hasOwn(WELL_KNOWN, full)) return send(res, 200, WELL_KNOWN[full]());
+  }
+  if (full !== PREFIX && !full.startsWith(`${PREFIX}/`)) return send(res, 404, { error: 'not_found' });
+  const p = full.slice(PREFIX.length) || '/';
 
   const doorMatch = DOOR_PATH.exec(p);
   const door = doorMatch && Object.hasOwn(DOORS, doorMatch[1]) ? DOORS[doorMatch[1] as keyof typeof DOORS] : undefined;
@@ -153,9 +170,6 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     if (Object.hasOwn(DOORS, p.slice(1))) return send(res, 200, DOOR_PAGE);
     if (p === '/pg/state') return send(res, 200, { doors: Object.values(DOORS).map((d) => ({ ...d.INFO, ...store.wallState(d.INFO.door, d.THROUGH) })) });
     if (p === '/pg/jwks.json') return send(res, 200, { keys: [verifier.jwk, issuer.jwk] });
-    if (p === '/.well-known/did.jsonl') return send(res, 200, Buffer.from(didLogText), { 'Content-Type': 'text/jsonl; charset=utf-8' });
-    if (p === '/.well-known/did.json') return send(res, 200, didWebDocument);
-    if (Object.hasOwn(WELL_KNOWN, p)) return send(res, 200, WELL_KNOWN[p]());
     if (p.startsWith('/pg/attempts/')) {
       const a = store.attemptDetail(p.slice('/pg/attempts/'.length));
       return a ? send(res, 200, a) : send(res, 404, { error: 'unknown_attempt' });

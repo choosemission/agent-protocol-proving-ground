@@ -19,7 +19,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { SignJWT, calculateJwkThumbprint, decodeJwt, decodeProtectedHeader, importJWK, jwtVerify, type JWK, type JWTPayload } from 'jose';
-import { BASE_URL, DEV, DID, PRIVATE, verifier, type DoorRequest } from '../lab.ts';
+import { BASE_URL, DEV, DID, ORIGIN, PREFIX, PRIVATE, fetchPublic, verifier, type DoorRequest } from '../lab.ts';
 import * as store from '../store.ts';
 
 const SPEC_URL = 'https://github.com/personal-agent-protocol/personal-agent-protocol/blob/6fb46d381ac1b94265795132af13848ec442b6f6/content/versions/0.3/spec.mdx';
@@ -189,7 +189,7 @@ async function fetchJson(u: string, code: Code, what: string) {
     const { address, family } = await guard(code, () => lookup(url.hostname));
     need(!PRIVATE.check(address, family === 6 ? 'ipv6' : 'ipv4'), code, `${what} resolves to a private address.`);
   }
-  const res = await guard(code, () => fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(5000), headers: { accept: 'application/json' } }));
+  const res = await guard(code, () => fetchPublic(url, { redirect: 'manual', signal: AbortSignal.timeout(5000), headers: { accept: 'application/json' } }));
   need(res.status === 200, code, `Fetching ${what} (${u}) returned ${res.status}; it must return 200 without redirecting.`);
   const text = await res.text();
   need(text.length <= 64_000, code, `${what} is over 64 kB.`);
@@ -228,7 +228,7 @@ async function resolveClient(clientId: string): Promise<Client> {
 export async function register(clientId: string) {
   try {
     await resolveClient(clientId);
-    return { client_metadata: 'valid', discovery: `${BASE_URL}/.well-known/poppy.json` };
+    return { client_metadata: 'valid', discovery: `${ORIGIN}/.well-known/poppy.json` };
   } catch (e) {
     if (!(e instanceof Stop)) throw e;
     return { client_metadata: 'invalid', problem: e.message, next: 'Fix it; the door fetches it again on your first Session request, and at sign-in.' };
@@ -281,8 +281,9 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 /** A sign-in page. It can't be framed, so nobody can trick a click on Allow. */
 const page = (status: number, title: string, text: string, form = ''): Reply => ({
   status,
-  headers: { 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "frame-ancestors 'none'" },
-  body: Buffer.from(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)}</title><link rel="stylesheet" href="/style.css">
+  // The server's Content-Security-Policy, with frame-ancestors 'none', covers it too.
+  headers: { 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY' },
+  body: Buffer.from(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)}</title><link rel="stylesheet" href="${PREFIX}/style.css">
 <main><h1>${esc(title)}</h1><p>${esc(text)}</p>${form}</main>`),
 });
 
@@ -504,7 +505,7 @@ const intro = (): Reply => ({
   body: {
     door: 'poppy',
     message: 'This door is a Company under Personal Agent Protocol 0.3. Start with discovery; the conversation endpoint is in poppy.json.',
-    discovery: `${BASE_URL}/.well-known/poppy.json`,
+    discovery: `${ORIGIN}/.well-known/poppy.json`,
     register: `POST {"handle": "<your-handle>", "client_id": "<your client metadata URL>"} to ${BASE_URL}/pg/runs. The door refuses Session JWTs from a client_id no run registered.`,
     spec: SPEC_URL,
     instructions: `${BASE_URL}/llms.txt`,

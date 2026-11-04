@@ -14,7 +14,7 @@
 import { randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { SignJWT, decodeJwt, decodeProtectedHeader, importJWK, importX509, jwtVerify, type JWK, type JWTPayload } from 'jose';
-import { BASE_URL, DID, ORIGIN, PRIVATE, issuer, verifier, type DoorRequest } from '../lab.ts';
+import { BASE_URL, DID, ORIGIN, PRIVATE, fetchPublic, issuer, verifier, type DoorRequest } from '../lab.ts';
 import { VCT, digest } from '../issuer.ts';
 import * as store from '../store.ts';
 
@@ -313,7 +313,7 @@ async function dereference(uri: unknown) {
   need(url.protocol === 'https:', step, 'invalid_reference', 'credential_result_uri must be an https URL.');
   const { address, family } = await guard(step, 'invalid_reference', () => lookup(url.hostname));
   need(!PRIVATE.check(address, family === 6 ? 'ipv6' : 'ipv4'), step, 'invalid_reference', 'credential_result_uri resolves to a private address.');
-  const res = await guard(step, 'invalid_reference', () => fetch(url, { redirect: 'error', signal: AbortSignal.timeout(5000) }));
+  const res = await guard(step, 'invalid_reference', () => fetchPublic(url, { redirect: 'error', signal: AbortSignal.timeout(5000) }));
   need(res.ok, step, 'invalid_reference', `Fetching credential_result_uri returned ${res.status}.`);
   const text = await res.text();
   need(text.length <= 64_000, step, 'invalid_reference', 'The referenced credential result is over 64 kB.');
