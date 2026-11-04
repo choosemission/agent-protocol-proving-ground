@@ -288,6 +288,9 @@ test('a by-reference result over http is refused', async () => {
 test('the homepage, the x401 page and the stylesheet are served; unknown pages are not', async () => {
   for (const p of ['/', '/x401', '/style.css']) assert.equal((await fetch(`${BASE}${p}`)).status, 200, p);
   assert.equal((await fetch(`${BASE}/nope`)).status, 404);
+  const css = await fetch(`${BASE}/style.css`);
+  assert.match(css.headers.get('content-type')!, /^text\/css/);
+  assert.ok((await css.text()).startsWith('/*'), 'the stylesheet is sent as CSS, not as a JSON string');
   assert.equal((await fetch(`${ORIGIN}/x401`)).status, 404, 'outside the prefix');
   assert.equal((await fetch(`${BASE}/.well-known/did.jsonl`)).status, 404, 'the DID is at the origin only');
   const csp = (await fetch(`${BASE}/x401`)).headers.get('content-security-policy')!;

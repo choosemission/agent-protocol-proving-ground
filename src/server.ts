@@ -39,7 +39,7 @@ const DOOR_PAGE = Buffer.from(page('door.html'));
 const scriptHashes = [HOME, DOOR_PAGE.toString()].flatMap((h) => [...h.matchAll(/<script>([\s\S]*?)<\/script>/g)])
   .map(([, js]) => `'sha256-${createHash('sha256').update(js).digest('base64')}'`);
 const CSP = `default-src 'self'; script-src ${scriptHashes.join(' ') || "'none'"}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`;
-const CSS = page('style.css');
+const CSS = Buffer.from(page('style.css'));
 const HANDLE = /^[a-z0-9][a-z0-9-]{1,30}$/;
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const START = `POST {"handle": "<your-handle>"} to ${BASE_URL}/pg/runs`;
