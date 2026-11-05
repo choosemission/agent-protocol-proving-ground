@@ -1,6 +1,6 @@
 /**
  * The proving-ground service: the doors (one per protocol), the Lab test
- * issuer, runs, and the public wall with its live feed. Every route is in
+ * issuer, runs, and the wall with its live feed. Every route is in
  * `route` below.
  *
  * Every path is below PREFIX (from BASE_URL, e.g. /proving-ground) except the
@@ -36,11 +36,50 @@ const WELL_KNOWN: Record<string, () => unknown> = { ...poppy.WELL_KNOWN, ...aaut
 const page = (f: string) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8').replaceAll('{{root}}', PREFIX);
 const HOME = page('index.html');
 const DOOR_PAGE = Buffer.from(page('door.html'));
-// The pages share an origin with the Lab's signed-in site, so only their own inline script may run.
-const scriptHashes = [HOME, DOOR_PAGE.toString()].flatMap((h) => [...h.matchAll(/<script>([\s\S]*?)<\/script>/g)])
-  .map(([, js]) => `'sha256-${createHash('sha256').update(js).digest('base64')}'`);
-const CSP = `default-src 'self'; script-src ${scriptHashes.join(' ') || "'none'"}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`;
 const CSS = Buffer.from(page('style.css'));
+
+/**
+ * The Lab's header and footer: a page from the Lab's website with <!--content--> in its <main>
+ * (affinidi-lab's web/agentlab/src/pages/shell.astro). Read in the background and kept for a
+ * minute, so a page never waits on it; until it answers, and wherever SHELL_URL is unset, pages go
+ * out bare. Its asset URLs are root-relative, so it only works on the Lab's origin.
+ */
+const SHELL_URL = process.env.SHELL_URL;
+let shell: string | undefined;
+let shellAt = 0;
+function currentShell() {
+  if (SHELL_URL && Date.now() - shellAt > 60_000) {
+    shellAt = Date.now();
+    fetch(SHELL_URL, { signal: AbortSignal.timeout(5_000) })
+      .then(async (r) => { const t = r.ok ? await r.text() : ''; if (t.includes('<!--content-->')) shell = t; })
+      .catch(() => {});
+  }
+  return shell;
+}
+currentShell();
+
+/** Puts a page's <main class="pg"> into the Lab's shell, with the page's own title and stylesheet. */
+function inShell(html: string) {
+  const s = currentShell();
+  const main = /<main class="pg">([\s\S]*)<\/main>/.exec(html);
+  if (!s || !main) return html;
+  const title = /<title>([\s\S]*?)<\/title>/.exec(html)?.[1] ?? 'Proving ground — Agent Lab';
+  return s
+    .replace(/<title>[\s\S]*?<\/title>/, () => `<title>${title}</title>`)
+    // They name the shell's own URL, not this page's.
+    .replace(/<link rel="canonical"[^>]*>|<meta property="og:url"[^>]*>/g, '')
+    .replace('</head>', () => `<link rel="stylesheet" href="${PREFIX}/style.css"></head>`)
+    .replace('<!--content-->', () => `<div class="pg">${main[1]}</div>`);
+}
+
+// The pages share an origin with the Lab's signed-in site, so only their own inline scripts may
+// run, and in the shell the Lab's from its origin.
+function csp(html: string, shelled: boolean) {
+  const hashes = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].filter(([, js]) => js)
+    .map(([, js]) => `'sha256-${createHash('sha256').update(js).digest('base64')}'`);
+  const scripts = [...(shelled ? ["'self'"] : []), ...hashes];
+  return `default-src 'self'; script-src ${scripts.join(' ') || "'none'"}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`;
+}
 const HANDLE = /^[a-z0-9][a-z0-9-]{1,30}$/;
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const START = `POST {"handle": "<your-handle>"} to ${BASE_URL}/pg/runs`;
@@ -62,7 +101,8 @@ const llms = () => `# Agent Lab proving ground
 
 > A set of doors, one per agent protocol. Each door implements its protocol as
 > published at a pinned commit, and scores every attempt by how far up its
-> ladder of checks you got. Every attempt shows live on a public wall.
+> ladder of checks you got. Every attempt shows live on a wall that
+> Lab participants see when signed in.
 
 The protocol is the test: read the pinned spec and do what it says. The door
 tells you why it stopped you at every step, so read its error responses.
@@ -98,13 +138,12 @@ ${Object.values(DOORS).map((d) => `### ${d.INFO.door}
 - Builds on:${d.INFO.builds_on.map((b) => `\n  - ${b.name}: ${b.url}`).join('')}
 - ${d.INFO.about}${'advice' in d.INFO ? d.INFO.advice.map((a) => `\n- ${a}`).join('') : ''}
 - Steps: ${d.INFO.ladder.map((s) => s.name).join(' → ')}
-- Wall: ${BASE_URL}/${d.INFO.door}`).join('\n\n')}
+- Wall, for signed-in Lab participants: ${BASE_URL}/${d.INFO.door}`).join('\n\n')}
 
 ## Keys and state
 
 - Verifier and issuer keys: ${BASE_URL}/pg/jwks.json (verify receipts here)
 - Verifier DID: ${DID}, its log at ${ORIGIN}/.well-known/did.jsonl (a parallel did:web at ${ORIGIN}/.well-known/did.json)
-- Every door's live state: ${BASE_URL}/pg/state
 `;
 const DOOR_PATH = /^\/pg\/doors\/([a-z0-9-]+)(?:\/r\/([A-Za-z0-9_-]{22}))?(\/.*)?$/;
 
@@ -117,9 +156,14 @@ const CORS = {
 };
 
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
-  const html = Buffer.isBuffer(body);
-  res.writeHead(status, { ...CORS, 'Content-Type': html ? 'text/html; charset=utf-8' : 'application/json', ...(html && { 'Content-Security-Policy': CSP }), ...headers });
-  res.end(html ? body : JSON.stringify(body, null, 2));
+  let html = Buffer.isBuffer(body) && !headers['Content-Type'] ? body.toString('utf8') : undefined;
+  if (html !== undefined) {
+    const shelled = inShell(html);
+    headers = { 'Content-Security-Policy': csp(shelled, shelled !== html), ...headers };
+    html = shelled;
+  }
+  res.writeHead(status, { ...CORS, 'Content-Type': Buffer.isBuffer(body) ? 'text/html; charset=utf-8' : 'application/json', ...headers });
+  res.end(html ?? (Buffer.isBuffer(body) ? body : JSON.stringify(body, null, 2)));
 }
 
 async function readBody(req: IncomingMessage) {
@@ -188,7 +232,7 @@ async function route(req: IncomingMessage, res: ServerResponse) {
   if (m === 'POST' && p === '/pg/runs') {
     const { handle, client_id } = await readJson(req);
     if (typeof handle !== 'string' || !HANDLE.test(handle)) {
-      return send(res, 400, { error: 'invalid_handle', message: 'A handle is 2 to 31 characters: lowercase letters, digits and hyphens. It appears on the public wall.' });
+      return send(res, 400, { error: 'invalid_handle', message: 'A handle is 2 to 31 characters: lowercase letters, digits and hyphens. It appears on the wall, which every Lab participant can see.' });
     }
     if (store.handleTaken(handle)) return send(res, 409, { error: 'handle_taken', message: 'That handle is taken; pick another.' });
     const clientProblem = client_id === undefined ? null : poppy.clientIdProblem(client_id);

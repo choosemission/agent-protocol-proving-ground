@@ -3,21 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Proving ground · Agent Lab</title>
+<title>Proving ground — Agent Lab</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap">
 <!--
-  A door's wall, served at /<door>: public, read-only, live. One file, no
+  A door's wall, served at /<door>: read-only, live, and on the Lab
+  behind sign-in (affinidi-lab's Caddyfile gates it and its data). One file, no
   build. It reads /pg/state and re-reads it whenever /pg/events pings.
   Handles only, never run IDs.
 -->
 <link rel="stylesheet" href="{{root}}/style.css">
 </head>
 <body>
-<main>
-  <header>
+<main class="pg">
+  <header class="pg-header">
     <div>
-      <div class="label"><a href="{{root}}/">Agent Lab · Proving ground</a></div>
+      <p class="eyebrow"><a href="{{root}}/">Proving ground</a></p>
       <h1 id="title">Proving ground</h1>
       <nav class="mono" id="doors"></nav>
       <div class="mono muted" id="pin"></div>
@@ -25,7 +26,7 @@
     <div class="mono"><span id="live" class="live off">connecting</span> · <span id="totals"></span></div>
   </header>
 
-  <div class="grid">
+  <div class="columns">
     <div>
       <section>
         <h2>Runs</h2>
@@ -77,7 +78,6 @@
       </section>
     </div>
   </div>
-</main>
 
 <dialog id="attempt" aria-labelledby="attempt-title">
   <h2 id="attempt-title">Attempt</h2>
@@ -108,7 +108,7 @@
   function render() {
     const s = state;
     $('title').textContent = `The ${s.door} door`;
-    document.title = `${s.door} door · Proving ground · Agent Lab`;
+    document.title = `The ${s.door} door — Proving ground — Agent Lab`;
     $('doors').innerHTML = 'Doors: ' + doors.map((d) => d.door === s.door ? `<strong>${esc(d.door)}</strong>` : `<a href="{{root}}/${esc(d.door)}">${esc(d.door)}</a>`).join(' · ');
     $('pin').innerHTML = `${esc(s.spec.name)} ${esc(s.spec.version)} · <a href="${esc(s.spec.url)}">${esc(s.spec.pinned)}</a>`;
     $('asks').textContent = s.about;
@@ -189,5 +189,6 @@
   showMine();
   refresh().then(fromHash);
 </script>
+</main>
 </body>
 </html>

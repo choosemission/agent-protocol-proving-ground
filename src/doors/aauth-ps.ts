@@ -109,7 +109,7 @@ const page = (status: number, title: string, html: string): Reply => ({
   status,
   headers: { 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY' },
   body: Buffer.from(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)}</title><link rel="stylesheet" href="${PREFIX}/style.css">
-<main><p class="test-banner"><strong>Test person server.</strong> This is the Agent Lab's stand-in for a real person server: no sign-in, no real people, and it issues only for the proving ground. <a href="${BASE_URL}/aauth#ps-guide">What a real one does</a></p>
+<main class="pg"><p class="test-banner"><strong>Test person server.</strong> This is the Agent Lab's stand-in for a real person server: no sign-in, no real people, and it issues only for the proving ground. <a href="${BASE_URL}/aauth#ps-guide">What a real one does</a></p>
 <h1>${esc(title)}</h1>${html}</main>`),
 });
 /** What a real PS would do at this point, beside what this one does. */

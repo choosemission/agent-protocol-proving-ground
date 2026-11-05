@@ -2,8 +2,10 @@
 
 A proof of concept for the Agent Lab proving ground
 ([plan](../affinidi-lab/docs/proving-ground-plan.md)): a set of **doors**, one
-per agent protocol, and a homepage listing them. Each door has a public wall at `/<door>` that
-shows every attempt live. Each door implements one protocol as published at a pinned commit and
+per agent protocol, and a homepage listing them. Each door has a wall at `/<door>` that
+shows every attempt live. On the Lab the homepage, walls and their data
+(`/pg/state`, `/pg/events`, `/pg/attempts/*`) are behind sign-in, set in
+affinidi-lab's Caddyfile; the doors, runs, issuer and `llms.txt` answer anyone. Each door implements one protocol as published at a pinned commit and
 scores each attempt by how far up that protocol's ladder of checks it got.
 It claims nothing about conformance.
 
@@ -28,6 +30,7 @@ npm run typecheck
 | --- | --- | --- |
 | `PORT` | `8401` | |
 | `BASE_URL` | `http://pg.localhost:$PORT` | Public URL, and it may have a path: the Lab runs it at `https://agentlab.choosemission.com/proving-ground`. Every page, door and link lives under it. The DID and the `/.well-known` documents (`did.jsonl`, `did.json`, `poppy.json`, `oauth-protected-resource`, the poppy issuer's metadata, `aauth-resource.json`, `aauth-person.json`) are the Lab's identity, so they are served at the origin, and the DID is the host's: `did:webvh:<scid>:agentlab.choosemission.com`. Must be a domain name (did:webvh refuses bare `localhost`; `*.localhost` resolves to this machine) |
+| `SHELL_URL` | unset | The Lab's header and footer: a page with `<!--content-->` in its `<main>` (affinidi-lab's `web/agentlab/src/pages/shell.astro`, which the Lab reads from `http://website:8080/shell/`). Every HTML page goes out inside it, with its own title and stylesheet. Its asset URLs are root-relative, so it only works on the Lab's origin. Unset, or until it answers, pages go out bare, styled the same |
 | `DATA_DIR` | `./data` | SQLite database, the signing keys (the DID's, and the aauth door's resource and test PS keys) and the DID log (`did.jsonl`), made on first start. Keep it on a persistent volume: it *is* the DID. A new host needs an empty one, and gets a new DID |
 
 **Dev switch.** When `BASE_URL` is `http://localhost`, `http://*.localhost` or `http://127.0.0.1`, doors accept `http` URLs
@@ -46,8 +49,8 @@ The image runs as `node` and keeps `DATA_DIR` at `/data`; that volume is the Lab
 `/llms.txt` gives an agent the Lab-specific steps in full: start a run, get
 the handle credential, find its door URLs. For the protocol itself it points
 to each door's pinned spec, because following the spec is what the door
-tests. The homepage is rendered on the server, so an agent that fetches `/`
-sees the doors without running JavaScript, and each door's `401` body links
+tests. The homepage is rendered on the server, so it reads the same without
+JavaScript (on the Lab it is behind sign-in, so agents start at `/llms.txt`), and each door's `401` body links
 to `/llms.txt` (and, on the anonymous URL, says how to start a run).
 
 ## Runs

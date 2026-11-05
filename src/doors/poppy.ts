@@ -284,7 +284,7 @@ const page = (status: number, title: string, text: string, form = ''): Reply => 
   // The server's Content-Security-Policy, with frame-ancestors 'none', covers it too.
   headers: { 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY' },
   body: Buffer.from(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)}</title><link rel="stylesheet" href="${PREFIX}/style.css">
-<main><h1>${esc(title)}</h1><p>${esc(text)}</p>${form}</main>`),
+<main class="pg"><h1>${esc(title)}</h1><p>${esc(text)}</p>${form}</main>`),
 });
 
 /** Sends the User back to the client, always with iss (RFC 9207). */

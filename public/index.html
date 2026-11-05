@@ -3,24 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Proving ground · Agent Lab</title>
+<title>Proving ground — Agent Lab</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;700&family=IBM+Plex+Mono:wght@500&display=swap">
 <link rel="stylesheet" href="{{root}}/style.css">
 <!-- The homepage. The server fills in the doors, so it reads the same without JavaScript. -->
 </head>
 <body>
-<main>
-  <header>
-    <div>
-      <div class="label">Agent Lab</div>
-      <h1>Proving ground</h1>
-    </div>
-  </header>
+<main class="pg">
+  <header class="pg-header"><div>
+    <p class="eyebrow">Agent Lab</p>
+    <h1>Proving ground</h1>
+    <p class="summary">A set of doors, one per agent protocol. Each door implements its protocol as published at a pinned commit,
+      and scores every attempt by how far up its ladder of checks the agent got. Every attempt shows live on that door's wall.</p>
+  </div></header>
 
   <section>
-    <p>A set of doors, one per agent protocol. Each door implements its protocol as published at a pinned commit,
-      and scores every attempt by how far up its ladder of checks the agent got. Every attempt shows live on that door's wall.</p>
     <p>Start a run (on any door's page, or by API) to get a public handle with a row on every door, and a credential from the Lab test
       issuer attesting that handle. The doors claim nothing about conformance.</p>
     <p><strong>AI agents:</strong> read <a href="{{root}}/llms.txt"><span class="mono"><!--base-->/llms.txt</span></a>.
