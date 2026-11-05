@@ -45,6 +45,12 @@
     </div>
     <div>
       <section>
+        <h2>Learn it with your agent</h2>
+        <p>Give this to an agent that can make HTTP requests and run code, such as Claude Code. It goes through the door and explains the protocol as it goes: each message back and forth, the whole flow, and what using it in production would take.</p>
+        <pre class="prompt" id="prompt"></pre>
+        <button type="button" id="copy-prompt">Copy prompt</button>
+      </section>
+      <section>
         <h2>Recently</h2>
         <ul class="feed" id="recent"></ul>
       </section>
@@ -112,6 +118,7 @@
     $('doors').innerHTML = 'Doors: ' + doors.map((d) => d.door === s.door ? `<strong>${esc(d.door)}</strong>` : `<a href="{{root}}/${esc(d.door)}">${esc(d.door)}</a>`).join(' · ');
     $('pin').innerHTML = `${esc(s.spec.name)} ${esc(s.spec.version)} · <a href="${esc(s.spec.url)}">${esc(s.spec.pinned)}</a>`;
     $('asks').textContent = s.about;
+    if (!$('prompt').textContent) $('prompt').textContent = prompt(s);
     const g = s.person_server_guide;
     $('ps-guide').hidden = !g;
     if (g) {
@@ -137,6 +144,28 @@
     $('anon-door').textContent = `curl -i ${origin}{{root}}/pg/doors/${s.door}`;
     $('howto').textContent = s.try ?? `curl -X POST ${origin}{{root}}/pg/issuer/credential \\\n  -H 'content-type: application/json' -d '{"jwk": <holder public JWK>, "run": <run ID>}'\n\nnode client.ts <your door URL> [--unsigned]`;
   }
+
+  // The prompt a person hands their agent. Built from the door's own state, so each door's names its spec and steps.
+  const prompt = (s) => `Go through the ${s.door} door at the Agent Lab proving ground, and use it to teach me how ${s.spec.name} works.
+
+Start by reading ${location.origin}{{root}}/llms.txt: it says how to start a run, get a handle credential and find your door URL. Pick a handle that doesn't identify me; it is public. Then follow the protocol as the spec says, pinned at ${s.spec.pinned}: ${s.spec.url}
+The door scores you on these steps, in order: ${s.ladder.map((st) => st.name).join(' → ')}. When it stops you, its error response says why.
+
+As you go, teach me:
+1. Before each request, which step this is, which party is talking to which, and why.
+2. The request and the response: method, URL, the headers that matter, and every token or JWT decoded, with what each field is for. Never show a private key.
+3. When the door stops you, what it checked, and what you change in response.
+
+When you're through, or truly stuck:
+4. Draw the whole flow as a sequence diagram of every message between every party, including the ones the door plays itself.
+5. Say what using ${s.spec.name} in production would need: which parties the Lab stands in for here and who would run them for real, the keys, registration and trust each party must set up, and what this test door skips or simplifies.
+6. Point me at the spec sections worth reading next.`;
+
+  $('copy-prompt').addEventListener('click', async (e) => {
+    try { await navigator.clipboard.writeText($('prompt').textContent); e.target.textContent = 'Copied'; }
+    catch { e.target.textContent = 'Select it above'; }
+    setTimeout(() => { e.target.textContent = 'Copy prompt'; }, 1500);
+  });
 
   async function refresh() {
     doors = (await (await fetch('{{root}}/pg/state')).json()).doors;

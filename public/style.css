@@ -106,3 +106,5 @@
 .pg .test-banner strong { color: var(--danger); }
 .pg .aside { border-left: 3px solid var(--signal); padding: 4px 0 4px 14px; margin: 20px 0; }
 .pg > form, .pg > p, .pg > .aside { max-width: var(--measure); }
+/* A prompt is prose: wrap at words, and keep it to a scrollable height. */
+.pg pre.prompt { word-break: normal; overflow-wrap: anywhere; max-height: 22rem; overflow-y: auto; }
