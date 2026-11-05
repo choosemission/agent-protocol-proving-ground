@@ -27,8 +27,8 @@ export const ORIGIN = new URL(BASE_URL).origin;
 export const PREFIX = new URL(BASE_URL).pathname.replace(/\/$/, '');
 export const DATA_DIR = process.env.DATA_DIR ?? 'data';
 const HOST = new URL(BASE_URL).host;
-/** What the server hands a door. `path` is below the door's URL ('' for the door itself), `url` the full public URL; `route` is the path as public timelines show it, run ID elided. */
-export type DoorRequest = { runId: string | null; route: string; method: string; path: string; url: URL; headers: IncomingHttpHeaders; body: string };
+/** What the server hands a door. `path` is below the door's URL ('' for the door itself), `url` the full public URL; `route` is the path as public timelines show it, run ID elided. `bytes` is the body as received, for doors that check a digest of it. */
+export type DoorRequest = { runId: string | null; route: string; method: string; path: string; url: URL; headers: IncomingHttpHeaders; body: string; bytes: Buffer };
 
 /** The one dev switch: on http://localhost (or *.localhost), doors accept http URLs and loopback addresses that the spec would refuse. */
 export const DEV = /^http:\/\/(([a-z0-9-]+\.)?localhost|127\.0\.0\.1)(:|$)/.test(BASE_URL);
@@ -72,6 +72,13 @@ async function es256(name: string, kid: string) {
   const { kty, crv, x, y, d } = await privateJwk(name, 'ES256');
   const jwk: JWK = { kty, crv, x, y, kid, alg: 'ES256', use: 'sig' };
   return { kid, jwk, key: (await importJWK({ ...jwk, d }, 'ES256')) as CryptoKey, publicKey: (await importJWK(jwk, 'ES256')) as CryptoKey };
+}
+
+/** An Ed25519 signing key kept in DATA_DIR, for a door that signs JWTs of its own (outside the DID). */
+export async function ed25519(name: string, kid: string) {
+  const { kty, crv, x, d } = await privateJwk(name, 'Ed25519');
+  const jwk: JWK = { kty, crv, x, kid, alg: 'Ed25519', use: 'sig' };
+  return { kid, jwk, key: (await importJWK({ ...jwk, d }, 'Ed25519')) as CryptoKey, secret: Buffer.from(d!, 'base64url') };
 }
 
 /** The DID log: read from DATA_DIR, or created for this host on first start. */

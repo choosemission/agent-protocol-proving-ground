@@ -11,6 +11,7 @@ It claims nothing about conformance.
 | --- | --- | --- |
 | `x401` | x401 0.2.0 at `proof/x401@7e864af`, OpenID4VP + SD-JWT VC | [src/doors/x401.md](src/doors/x401.md) |
 | `poppy` | Personal Agent Protocol 0.3 at `personal-agent-protocol@6fb46d3`: Session JWTs, conversations, and the door as its own OAuth issuer | [src/doors/poppy.md](src/doors/poppy.md) |
+| `aauth` | AAuth Protocol -11 at `dickhardt/AAuth@178e9e6`: signed requests (RFC 9421, Signature-Key), agent, person, resource and auth tokens, with any person server or the Lab test PS | [src/doors/aauth.md](src/doors/aauth.md) |
 
 ## Run it
 
@@ -26,12 +27,12 @@ npm run typecheck
 | Variable | Default | |
 | --- | --- | --- |
 | `PORT` | `8401` | |
-| `BASE_URL` | `http://pg.localhost:$PORT` | Public URL, and it may have a path: the Lab runs it at `https://agentlab.choosemission.com/proving-ground`. Every page, door and link lives under it. The DID and the `/.well-known` documents (`did.jsonl`, `did.json`, `poppy.json`, `oauth-protected-resource`, the poppy issuer's metadata) are the Lab's identity, so they are served at the origin, and the DID is the host's: `did:webvh:<scid>:agentlab.choosemission.com`. Must be a domain name (did:webvh refuses bare `localhost`; `*.localhost` resolves to this machine) |
-| `DATA_DIR` | `./data` | SQLite database, the signing keys and the DID log (`did.jsonl`), made on first start. Keep it on a persistent volume: it *is* the DID. A new host needs an empty one, and gets a new DID |
+| `BASE_URL` | `http://pg.localhost:$PORT` | Public URL, and it may have a path: the Lab runs it at `https://agentlab.choosemission.com/proving-ground`. Every page, door and link lives under it. The DID and the `/.well-known` documents (`did.jsonl`, `did.json`, `poppy.json`, `oauth-protected-resource`, the poppy issuer's metadata, `aauth-resource.json`, `aauth-person.json`) are the Lab's identity, so they are served at the origin, and the DID is the host's: `did:webvh:<scid>:agentlab.choosemission.com`. Must be a domain name (did:webvh refuses bare `localhost`; `*.localhost` resolves to this machine) |
+| `DATA_DIR` | `./data` | SQLite database, the signing keys (the DID's, and the aauth door's resource and test PS keys) and the DID log (`did.jsonl`), made on first start. Keep it on a persistent volume: it *is* the DID. A new host needs an empty one, and gets a new DID |
 
 **Dev switch.** When `BASE_URL` is `http://localhost`, `http://*.localhost` or `http://127.0.0.1`, doors accept `http` URLs
 and loopback addresses from agents that the specs would refuse, such as a poppy agent's client
-metadata on `http://localhost`. Anywhere else they are refused.
+metadata on `http://localhost`, or an AAuth identifier with `http` and a port. Anywhere else they are refused.
 
 ## Deploy
 
@@ -94,7 +95,7 @@ handles, never run IDs.
 
 | | |
 | --- | --- |
-| [`src/doors/`](src/doors) | One door per protocol: its challenge, ladder of checks and receipt, and its docs |
+| [`src/doors/`](src/doors) | One door per protocol: its challenge, ladder of checks and receipt, and its docs. The aauth door is three files: the resource, its verifier (`aauth-sig.ts`) and the Lab test person server (`aauth-ps.ts`) |
 | [`src/issuer.ts`](src/issuer.ts) | The Lab test issuer: the handle credential |
 | [`src/store.ts`](src/store.ts) | Runs and attempts in SQLite (`node:sqlite`), and the change bus |
 | [`src/lab.ts`](src/lab.ts) | Base URL, `did:webvh` (served at `/.well-known/did.jsonl`, with a parallel `did:web`), signing keys |
@@ -104,16 +105,18 @@ handles, never run IDs.
 | [`public/style.css`](public/style.css) | Shared styles |
 | [`client.ts`](client.ts) | Reference agent and wallet for the x401 door |
 | [`poppy-client.ts`](poppy-client.ts) | Reference Personal Agent for the poppy door |
-| [`test/e2e.test.ts`](test/e2e.test.ts), [`test/poppy.test.ts`](test/poppy.test.ts) | The real server, driven through every stop of each door |
+| [`aauth-client.ts`](aauth-client.ts) | Reference agent for the aauth door, its own agent provider; signs with `@hellocoop/httpsig` (a dev dependency) |
+| [`test/e2e.test.ts`](test/e2e.test.ts), [`test/poppy.test.ts`](test/poppy.test.ts), [`test/aauth.test.ts`](test/aauth.test.ts) | The real server, driven through every stop of each door |
 
 ## Adding a door
 
 Add `src/doors/<name>.ts` exporting `INFO` (`door`, `spec`, `proves`,
-`about`, `builds_on`, `ladder`), `THROUGH` (the index of the last step) and
+`about`, `builds_on`, `ladder`; optionally `advice`, more lines for `/llms.txt`, and `try`, the wall's
+"Try it" text), `THROUGH` (the index of the last step) and
 `serve(request)`, which gets a `DoorRequest` ([`src/lab.ts`](src/lab.ts): the run, the
 method, the path below the door's URL, the full URL, headers and body) and records attempts
 with `store.newAttempt({door: '<name>', ...})`. A door that needs documents at fixed paths
-exports `WELL_KNOWN` (path → document), as poppy does. Register it in `DOORS` (and
+exports `WELL_KNOWN` (path → document), as poppy and aauth do. Register it in `DOORS` (and
 `WELL_KNOWN`) in [`src/server.ts`](src/server.ts) and document it next to the code.
 
 ## Not built yet

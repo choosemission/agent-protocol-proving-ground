@@ -118,8 +118,8 @@
     $('proves').innerHTML = `Passing it proves: <strong>${esc(s.proves.toLowerCase())}</strong>.`;
     $('ladder').innerHTML = s.ladder.map((st) => `<li><a href="${esc(st.url)}">${esc(st.name)}</a></li>`).join('');
     const origin = location.origin;
-    $('anon-door').textContent = `curl -i ${origin}/pg/doors/${s.door}`;
-    $('howto').textContent = `curl -X POST ${origin}/pg/issuer/credential \\\n  -H 'content-type: application/json' -d '{"jwk": <holder public JWK>, "run": <run ID>}'\n\nnode client.ts <your door URL> [--unsigned]`;
+    $('anon-door').textContent = `curl -i ${origin}{{root}}/pg/doors/${s.door}`;
+    $('howto').textContent = s.try ?? `curl -X POST ${origin}{{root}}/pg/issuer/credential \\\n  -H 'content-type: application/json' -d '{"jwk": <holder public JWK>, "run": <run ID>}'\n\nnode client.ts <your door URL> [--unsigned]`;
   }
 
   async function refresh() {

@@ -9,5 +9,5 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test", "client.ts"]
+  "include": ["src", "test", "client.ts", "poppy-client.ts", "aauth-client.ts"]
 }
