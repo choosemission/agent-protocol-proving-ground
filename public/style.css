@@ -72,15 +72,13 @@
 .pg .funnel td:first-child { width: 40%; }
 .pg .fill { height: 12px; background: var(--signal); border-radius: 3px; }
 .pg .feed, .pg .ladder, .pg .tl { padding: 0; }
-.pg .feed { max-height: 24rem; overflow-y: auto; }
+.pg .feed, .pg .scroll { max-height: 24rem; overflow-y: auto; }
 .pg .feed li { list-style: none; padding: 8px 0; border-top: 1px solid var(--rule); cursor: pointer; }
 .pg .feed li:hover .handle { color: var(--signal); }
 .pg .ladder { counter-reset: s; }
 .pg .ladder li { list-style: none; counter-increment: s; padding: 2px 0; }
 .pg .ladder li::before { content: counter(s) '  '; font-family: var(--font-mono); color: var(--ink-faint); }
 .pg .tl li { list-style: none; padding: 6px 0; border-top: 1px solid var(--rule); display: grid; grid-template-columns: 24px 140px 1fr; gap: 8px; }
-.pg .guide dt { color: var(--ink); font-weight: 700; margin-top: 10px; }
-.pg .guide dd { margin: 2px 0 0; color: var(--ink-muted); }
 
 /* Code, as the Lab's fenced blocks. */
 .pg pre { background: var(--night); color: #edeff3; border-radius: var(--radius-small); padding: 1rem 1.25rem; overflow-x: auto;

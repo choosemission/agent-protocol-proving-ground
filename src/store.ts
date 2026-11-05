@@ -119,7 +119,7 @@ export function wallState(door: string, throughStep: number) {
   return {
     runs: all(
       `select r.handle, coalesce(max(a.step), -1) step, count(a.id) attempts
-       from runs r left join attempts a on a.run_id = r.id and a.door = ?
+       from runs r join attempts a on a.run_id = r.id and a.door = ?
        group by r.id order by step desc, r.created_at`,
       door,
     ),

@@ -94,8 +94,7 @@ asserts is about anyone. It issues for no resource but the proving ground. Bindi
 pending requests are in memory, and a restart forgets them.
 
 The UI says so too. Every page the test PS serves carries a "Test person server" banner, and both
-consent pages show what a real PS would do at that point. The wall has a panel, from
-`INFO.person_server_guide`, on what the test PS stands in for and what running a real one means.
+consent pages show what a real PS would do at that point.
 
 ## The ladder
 

@@ -98,20 +98,6 @@ export const INFO = {
   ladder: LADDER.map((s) => ({ name: s.name, url: `${SPEC_SITE}#${s.ref}` })),
   resource: ID,
   person_server: ID,
-  /** The wall's panel on the Lab test PS: what it stands in for, and what running a real one means. */
-  person_server_guide: {
-    title: 'The Lab test person server is a stand-in',
-    intro: `A person server (PS) represents a person to agents and resources: it says who the agent acts for, asks the person for consent, and issues the tokens that carry both. The Lab runs a test one at ${ID} so you can climb the ladder without running your own. It is not a real PS: anyone holding an interaction code picks any test account name, with no password, and nothing it asserts is about a real person. Passing with it proves your agent speaks AAuth, not that a real person stands behind it.`,
-    points: [
-      { term: 'Who runs one', text: 'The person chooses their PS; neither the agent nor the resource imposes it. Likely operators: an identity provider people already sign in with, an employer running one for its staff (often alongside its own agent provider and access server), or the person themselves.' },
-      { term: 'Signing the person in', text: 'A PS reachable from a network MUST authenticate whoever approves (13.13), with a password, passkey or similar. The test PS skips this on purpose.' },
-      { term: 'Consent', text: "A real PS shows the resource's name and description from its metadata, who the agent and its provider are, and the agent's justification marked as the agent's own words. It remembers decisions so the person isn't asked again, and can reach them out of band, for example with a push notification." },
-      { term: 'What its tokens mean', text: "A person token promises continuity, the same person again, as a pseudonymous sub for each resource. It is not identity proofing, even from a real PS. A resource that needs an age or a legal name gets it some other way, such as a verifiable credential." },
-      { term: 'Being trusted', text: 'Here the PS shares an origin with the door, so trust is a given. A real resource decides which person servers to accept: by agreement, by the person linking their PS at the resource, by payment, or on claims alone. A stolen PS signing key forges identity at every resource that accepts it, so key protection matters most.' },
-      { term: 'What else it runs', text: 'Durable bindings and consents, revocation when an agent provider withdraws an agent, and optionally missions and an audit log of what agents did. The test PS keeps everything in memory, issues only for this door, and has none of the optional parts.' },
-    ],
-    more: { name: 'Bring your own: aauth-person-server, a PS you can run', url: 'https://github.com/christian-posta/aauth-person-server' },
-  },
   /** The wall's "Try it" box: the reference agent, which is its own agent provider. */
   try: `node aauth-client.ts ${BASE_URL} \\\n  --public-url <https URL that reaches port 8403>\n\nIt prints the Lab test PS's interaction links: open them to pick a test account and consent.`,
   libraries: LIBRARIES,

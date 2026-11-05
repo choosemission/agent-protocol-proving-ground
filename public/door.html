@@ -36,14 +36,6 @@
         <ol class="ladder" id="ladder"></ol>
         <p class="muted">Implements the protocol as published at the pinned commit. It claims nothing about conformance.</p>
       </section>
-      <section id="ps-guide" hidden>
-        <div class="label">Test person server</div>
-        <h2 id="ps-guide-title"></h2>
-        <p id="ps-guide-intro"></p>
-        <h3 class="label">What running a real one means</h3>
-        <dl class="guide" id="ps-guide-points"></dl>
-        <p id="ps-guide-more"></p>
-      </section>
       <section>
         <h2>Learn it with your agent</h2>
         <p>Give this to an agent that can make HTTP requests and run code, such as Claude Code. It goes through the door and explains the protocol as it goes: each message back and forth, the whole flow, and what using it in production would take.</p>
@@ -67,7 +59,7 @@
       <section>
         <h2>Runs</h2>
         <div class="label" style="margin-bottom:8px">Each bar is the door's steps, filled to the furthest an attempt has got</div>
-        <table><tbody id="runs"></tbody></table>
+        <div class="scroll"><table><tbody id="runs"></tbody></table></div>
         <p class="mono" id="first"></p>
       </section>
       <section>
@@ -96,7 +88,7 @@
 
   const bar = (step) => {
     const n = state.ladder.length;
-    return `<div class="bar ${step === n - 1 ? 'through' : ''}" role="img" aria-label="${esc(where(step))}">` +
+    return `<div class="bar ${step === n - 1 ? 'through' : ''}" role="img" title="${esc(where(step))}" aria-label="${esc(where(step))}">` +
       state.ladder.map((_, i) => `<i class="${i <= step ? 'on' : ''}"></i>`).join('') + '</div>';
   };
   const where = (step, error) =>
@@ -115,17 +107,9 @@
     $('pin').innerHTML = `${esc(s.spec.name)} ${esc(s.spec.version)} · <a href="${esc(s.spec.url)}">${esc(s.spec.pinned)}</a>`;
     $('asks').textContent = s.about;
     if (!$('prompt').textContent) $('prompt').textContent = prompt(s);
-    const g = s.person_server_guide;
-    $('ps-guide').hidden = !g;
-    if (g) {
-      $('ps-guide-title').textContent = g.title;
-      $('ps-guide-intro').textContent = g.intro;
-      $('ps-guide-points').innerHTML = g.points.map((p) => `<dt>${esc(p.term)}</dt><dd>${esc(p.text)}</dd>`).join('');
-      $('ps-guide-more').innerHTML = g.more ? `<a href="${esc(g.more.url)}">${esc(g.more.name)}</a>` : '';
-    }
     $('totals').textContent = `${s.runs.length} runs · ${s.reached[0]} attempts · ${s.reached.at(-1)} through`;
-    const rows = s.runs.map((r) => `<tr><td class="handle">${esc(r.handle)}</td><td>${bar(r.step)}</td><td class="mono">${esc(where(r.step))}</td></tr>`);
-    if (s.anon.attempts) rows.push(`<tr><td class="handle muted">anon (${s.anon.attempts} calls)</td><td>${bar(s.anon.step)}</td><td class="mono">${esc(where(s.anon.step))}</td></tr>`);
+    const rows = s.runs.map((r) => `<tr><td class="handle">${esc(r.handle)}</td><td>${bar(r.step)}</td></tr>`);
+    if (s.anon.attempts) rows.push(`<tr><td class="handle muted">anon (${s.anon.attempts} calls)</td><td>${bar(s.anon.step)}</td></tr>`);
     $('runs').innerHTML = rows.join('') || '<tr><td class="muted">No attempts yet. Be the first.</td></tr>';
     $('first').innerHTML = s.first ? `First through: <span class="handle">${esc(s.first.handle)}</span>, ${time(s.first.at)}` : 'Nobody through yet.';
     const max = Math.max(1, s.reached[0]);
