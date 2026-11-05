@@ -109,8 +109,14 @@ const page = (status: number, title: string, html: string): Reply => ({
   status,
   headers: { 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY' },
   body: Buffer.from(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)}</title><link rel="stylesheet" href="${PREFIX}/style.css">
-<main><h1>${esc(title)}</h1>${html}</main>`),
+<main><p class="test-banner"><strong>Test person server.</strong> This is the Agent Lab's stand-in for a real person server: no sign-in, no real people, and it issues only for the proving ground. <a href="${BASE_URL}/aauth#ps-guide">What a real one does</a></p>
+<h1>${esc(title)}</h1>${html}</main>`),
 });
+/** What a real PS would do at this point, beside what this one does. */
+const REAL = {
+  bind: `<div class="aside"><p class="label">A real person server here</p><p>would first sign you in to your own account, with a password or passkey, because a PS must authenticate whoever approves (13.13). It would show the agent's provider by name, from its metadata, and the resource's name and description. You would link this agent to yourself once, and later requests could be answered without asking you.</p></div>`,
+  consent: `<div class="aside"><p class="label">A real person server here</p><p>would show what the resource says the scope means, and mark the agent's justification as unchecked. It would remember your answer, so you aren't asked again, and might reach you by push notification instead of a code. With missions, it would also check the request fits the task you approved.</p></div>`,
+};
 
 // ---- Endpoints ----
 
@@ -288,7 +294,7 @@ function interactPage(r: DoorRequest): Reply {
     : `<p>Your agent <code>${esc(s.agent)}</code> (from ${esc(s.provider)}) asks for scope <code>${esc(s.scope ?? '')}</code> at the proving ground.</p>
        ${s.justification ? `<p>The agent says (its own words, not checked): <q>${esc(s.justification)}</q></p>` : ''}`;
   return page(200, p.kind === 'bind' ? 'Let this agent act for you?' : 'Allow this access?', `<form method="post" action="${PS}/interact"><input type="hidden" name="pending" value="${p.id}">${ask}
-<p><button name="decision" value="allow">Allow</button> <button name="decision" value="deny" formnovalidate>Deny</button></p></form>`);
+<p><button name="decision" value="allow">Allow</button> <button name="decision" value="deny" formnovalidate>Deny</button></p></form>${REAL[p.kind]}`);
 }
 
 /** POST {PS}/interact: the person's decision. */

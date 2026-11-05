@@ -93,6 +93,10 @@ This one doesn't. Whoever holds the code picks a test account. That's the point:
 asserts is about anyone. It issues for no resource but the proving ground. Bindings, consents and
 pending requests are in memory, and a restart forgets them.
 
+The UI says so too. Every page the test PS serves carries a "Test person server" banner, and both
+consent pages show what a real PS would do at that point. The wall has a panel, from
+`INFO.person_server_guide`, on what the test PS stands in for and what running a real one means.
+
 ## The ladder
 
 **An attempt is one signing key on one run's URL.** Every token an agent holds is bound to the same

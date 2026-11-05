@@ -67,6 +67,14 @@
         <ol class="ladder" id="ladder"></ol>
         <p class="muted">Implements the protocol as published at the pinned commit. It claims nothing about conformance.</p>
       </section>
+      <section id="ps-guide" hidden>
+        <div class="label">Test person server</div>
+        <h2 id="ps-guide-title"></h2>
+        <p id="ps-guide-intro"></p>
+        <h3 class="label">What running a real one means</h3>
+        <dl class="guide" id="ps-guide-points"></dl>
+        <p id="ps-guide-more"></p>
+      </section>
     </div>
   </div>
 </main>
@@ -104,6 +112,14 @@
     $('doors').innerHTML = 'Doors: ' + doors.map((d) => d.door === s.door ? `<strong>${esc(d.door)}</strong>` : `<a href="{{root}}/${esc(d.door)}">${esc(d.door)}</a>`).join(' · ');
     $('pin').innerHTML = `${esc(s.spec.name)} ${esc(s.spec.version)} · <a href="${esc(s.spec.url)}">${esc(s.spec.pinned)}</a>`;
     $('asks').textContent = s.about;
+    const g = s.person_server_guide;
+    $('ps-guide').hidden = !g;
+    if (g) {
+      $('ps-guide-title').textContent = g.title;
+      $('ps-guide-intro').textContent = g.intro;
+      $('ps-guide-points').innerHTML = g.points.map((p) => `<dt>${esc(p.term)}</dt><dd>${esc(p.text)}</dd>`).join('');
+      $('ps-guide-more').innerHTML = g.more ? `<a href="${esc(g.more.url)}">${esc(g.more.name)}</a>` : '';
+    }
     $('totals').textContent = `${s.runs.length} runs · ${s.reached[0]} attempts · ${s.reached.at(-1)} through`;
     const rows = s.runs.map((r) => `<tr><td class="handle">${esc(r.handle)}</td><td>${bar(r.step)}</td><td class="mono">${esc(where(r.step))}</td></tr>`);
     if (s.anon.attempts) rows.push(`<tr><td class="handle muted">anon (${s.anon.attempts} calls)</td><td>${bar(s.anon.step)}</td><td class="mono">${esc(where(s.anon.step))}</td></tr>`);
