@@ -29,44 +29,6 @@
   <div class="columns">
     <div>
       <section>
-        <h2>Runs</h2>
-        <div class="label" style="margin-bottom:8px">Each bar is the door's steps, filled to the furthest an attempt has got</div>
-        <table><tbody id="runs"></tbody></table>
-        <p class="mono" id="first"></p>
-      </section>
-      <section>
-        <h2>How far attempts got</h2>
-        <table class="funnel"><tbody id="funnel"></tbody></table>
-      </section>
-      <section>
-        <h2>Where they stopped</h2>
-        <table><tbody id="stopped"></tbody></table>
-      </section>
-    </div>
-    <div>
-      <section>
-        <h2>Learn it with your agent</h2>
-        <p>Give this to an agent that can make HTTP requests and run code, such as Claude Code. It goes through the door and explains the protocol as it goes: each message back and forth, the whole flow, and what using it in production would take.</p>
-        <pre class="prompt" id="prompt"></pre>
-        <button type="button" id="copy-prompt">Copy prompt</button>
-      </section>
-      <section>
-        <h2>Recently</h2>
-        <ul class="feed" id="recent"></ul>
-      </section>
-      <section>
-        <h2>Try it</h2>
-        <p>Start a run to get your own row on every door, and a credential from the Lab issuer attesting your handle. Your handle is public; pick one that doesn't identify you.</p>
-        <form id="start"><label class="label" for="handle" hidden>Handle</label>
-          <input id="handle" name="handle" placeholder="your-handle" pattern="[a-z0-9][a-z0-9\-]{1,30}" required autocomplete="off">
-          <button>Start a run</button></form>
-        <div id="mine"></div>
-        <p>Or call the door without a run, anonymously:</p>
-        <pre id="anon-door"></pre>
-        <p>Get your run's handle credential, bound to your holder key, or run the reference client:</p>
-        <pre id="howto"></pre>
-      </section>
-      <section>
         <h2>About this door</h2>
         <p id="proves"></p>
         <p id="asks"></p>
@@ -81,6 +43,40 @@
         <h3 class="label">What running a real one means</h3>
         <dl class="guide" id="ps-guide-points"></dl>
         <p id="ps-guide-more"></p>
+      </section>
+      <section>
+        <h2>Learn it with your agent</h2>
+        <p>Give this to an agent that can make HTTP requests and run code, such as Claude Code. It goes through the door and explains the protocol as it goes: each message back and forth, the whole flow, and what using it in production would take.</p>
+        <pre class="prompt" id="prompt"></pre>
+        <button type="button" id="copy-prompt">Copy prompt</button>
+      </section>
+      <section>
+        <h2>Try it</h2>
+        <p>Start a run to get your own row on every door, and a credential from the Lab issuer attesting your handle. Your handle is public; pick one that doesn't identify you.</p>
+        <form id="start"><label class="label" for="handle" hidden>Handle</label>
+          <input id="handle" name="handle" placeholder="your-handle" pattern="[a-z0-9][a-z0-9\-]{1,30}" required autocomplete="off">
+          <button>Start a run</button></form>
+        <div id="mine"></div>
+        <p>Or call the door without a run, anonymously:</p>
+        <pre id="anon-door"></pre>
+        <p>Get your run's handle credential, bound to your holder key, or run the reference client:</p>
+        <pre id="howto"></pre>
+      </section>
+    </div>
+    <div>
+      <section>
+        <h2>Runs</h2>
+        <div class="label" style="margin-bottom:8px">Each bar is the door's steps, filled to the furthest an attempt has got</div>
+        <table><tbody id="runs"></tbody></table>
+        <p class="mono" id="first"></p>
+      </section>
+      <section>
+        <h2>Recently</h2>
+        <ul class="feed" id="recent"></ul>
+      </section>
+      <section>
+        <h2>How far attempts got</h2>
+        <table class="funnel"><tbody id="funnel"></tbody></table>
       </section>
     </div>
   </div>
@@ -135,7 +131,6 @@
     const max = Math.max(1, s.reached[0]);
     $('funnel').innerHTML = s.ladder.map((st, i) =>
       `<tr><td class="mono">${esc(st.name)}</td><td><div class="fill" style="width:${(100 * s.reached[i]) / max}%"></div></td><td class="mono">${s.reached[i]}</td></tr>`).join('');
-    $('stopped').innerHTML = s.stopped.map((x) => `<tr><td class="mono bad">✗ ${esc(x.error)}</td><td class="mono">${x.n}</td></tr>`).join('') || '<tr><td class="muted">Nothing has stopped yet.</td></tr>';
     $('recent').innerHTML = s.recent.map((a) =>
       `<li data-id="${esc(a.id)}"><span class="mono muted">${time(a.at)}</span> <span class="handle">${esc(a.handle)}</span> <span class="mono">${mark(a.step, a.error)}</span></li>`).join('') || '<li class="muted">Quiet so far.</li>';
     $('proves').innerHTML = `Passing it proves: <strong>${esc(s.proves.toLowerCase())}</strong>.`;

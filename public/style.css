@@ -72,6 +72,7 @@
 .pg .funnel td:first-child { width: 40%; }
 .pg .fill { height: 12px; background: var(--signal); border-radius: 3px; }
 .pg .feed, .pg .ladder, .pg .tl { padding: 0; }
+.pg .feed { max-height: 24rem; overflow-y: auto; }
 .pg .feed li { list-style: none; padding: 8px 0; border-top: 1px solid var(--rule); cursor: pointer; }
 .pg .feed li:hover .handle { color: var(--signal); }
 .pg .ladder { counter-reset: s; }
