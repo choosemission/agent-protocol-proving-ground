@@ -10,7 +10,7 @@
  *   GET      /llms.txt                   instructions for agents
  *   GET|POST /pg/doors/<door>[/...]      a door, anonymous, and any paths below it
  *   GET|POST /pg/doors/<door>/r/<run>    a door, on a run's row of the wall
- *   GET      /.well-known/...            documents a door claims (WELL_KNOWN), such as poppy.json
+ *   GET      /.well-known/...            documents a door claims (WELL_KNOWN), such as poppy.json and aauth-resource.json
  *   POST     /pg/runs                    start a run: {"handle": "...", "client_id"?: "<Personal Agent client_id>"}
  *   POST     /pg/issuer/credential       get the run's handle credential: {"jwk": <holder public JWK>, "run": <run ID>}
  *   GET      /pg/state, /pg/events       the wall's data, and a ping on every change (SSE)
@@ -27,10 +27,11 @@ import { issueCredential } from './issuer.ts';
 import * as store from './store.ts';
 import * as x401 from './doors/x401.ts';
 import * as poppy from './doors/poppy.ts';
+import * as aauth from './doors/aauth.ts';
 
 /** Every door: one protocol each. A door exports INFO, THROUGH and serve(DoorRequest), and may claim WELL_KNOWN documents. */
-const DOORS = { x401, poppy };
-const WELL_KNOWN: Record<string, () => unknown> = { ...poppy.WELL_KNOWN };
+const DOORS = { x401, poppy, aauth };
+const WELL_KNOWN: Record<string, () => unknown> = { ...poppy.WELL_KNOWN, ...aauth.WELL_KNOWN };
 
 const page = (f: string) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8').replaceAll('{{root}}', PREFIX);
 const HOME = page('index.html');
@@ -95,7 +96,7 @@ ${Object.values(DOORS).map((d) => `### ${d.INFO.door}
 - Your door: ${'endpoint' in d.INFO ? `discover it at ${ORIGIN}/.well-known/poppy.json; register your client_id by adding "client_id" to the POST to ${BASE_URL}/pg/runs` : `${BASE_URL}/pg/doors/${d.INFO.door}/r/<run ID>`}
 - Spec: ${d.INFO.spec.name} ${d.INFO.spec.version}, pinned at ${d.INFO.spec.pinned}: ${d.INFO.spec.url}
 - Builds on:${d.INFO.builds_on.map((b) => `\n  - ${b.name}: ${b.url}`).join('')}
-- ${d.INFO.about}
+- ${d.INFO.about}${'advice' in d.INFO ? d.INFO.advice.map((a) => `\n- ${a}`).join('') : ''}
 - Steps: ${d.INFO.ladder.map((s) => s.name).join(' → ')}
 - Wall: ${BASE_URL}/${d.INFO.door}`).join('\n\n')}
 
@@ -111,8 +112,8 @@ const DOOR_PATH = /^\/pg\/doors\/([a-z0-9-]+)(?:\/r\/([A-Za-z0-9_-]{22}))?(\/.*)
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST',
-  'Access-Control-Allow-Headers': 'PROOF-RESPONSE, Content-Type, Poppy-Session, Authorization, DPoP',
-  'Access-Control-Expose-Headers': 'PROOF-REQUEST, PROOF-RESULT, WWW-Authenticate',
+  'Access-Control-Allow-Headers': 'PROOF-RESPONSE, Content-Type, Poppy-Session, Authorization, DPoP, Signature, Signature-Input, Signature-Key, Content-Digest, AAuth-Capabilities, Prefer',
+  'Access-Control-Expose-Headers': 'PROOF-REQUEST, PROOF-RESULT, WWW-Authenticate, AAuth-Requirement, Signature-Error, Accept-Signature-Scheme, Accept-Signature-Alg, Location, Retry-After, Link',
 };
 
 function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -129,9 +130,9 @@ async function readBody(req: IncomingMessage) {
     if (size > 16_384) throw new Error('Body over 16 kB.');
     chunks.push(chunk);
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
-const readJson = async (req: IncomingMessage) => JSON.parse((await readBody(req)) || '{}');
+const readJson = async (req: IncomingMessage) => JSON.parse((await readBody(req)).toString('utf8') || '{}');
 
 // The wall refetches /pg/state on each ping, so the ping carries no data.
 const listeners = new Set<ServerResponse>();
@@ -159,7 +160,8 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     const runId = doorMatch![2] ?? null;
     if (runId && !store.runExists(runId)) return send(res, 404, { error: 'unknown_run', message: `No run with that ID. ${START} to start one.` });
     const path = doorMatch![3] ?? '';
-    const r = await door.serve({ runId, route: `/pg/doors/${doorMatch![1]}${runId ? '/r/…' : ''}${path}`, method: m, path, url: new URL(req.url ?? '/', BASE_URL), headers: req.headers, body: m === 'POST' ? await readBody(req) : '' });
+    const bytes = m === 'POST' ? await readBody(req) : Buffer.alloc(0);
+    const r = await door.serve({ runId, route: `/pg/doors/${doorMatch![1]}${runId ? '/r/…' : ''}${path}`, method: m, path, url: new URL(req.url ?? '/', BASE_URL), headers: req.headers, body: bytes.toString('utf8'), bytes });
     return send(res, r.status, r.body, r.headers);
   }
 

@@ -52,3 +52,9 @@ dialog::backdrop { background: rgb(0 0 0 / 0.6); }
 .tl li { list-style: none; padding: 6px 0; border-top: 1px solid var(--rule); display: grid; grid-template-columns: 24px 140px 1fr; gap: 8px; }
 .tl { padding: 0; }
 .muted { color: var(--on-dark-muted); }
+h3.label { margin: 16px 0 8px; font-weight: 500; }
+.guide dt { color: var(--on-dark); font-weight: 700; margin-top: 10px; }
+.guide dd { margin: 2px 0 0; }
+.test-banner { border: 1px solid var(--danger); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; }
+.test-banner strong { color: var(--danger); }
+.aside { border-left: 3px solid var(--accent); padding: 4px 0 4px 14px; margin: 20px 0; }
