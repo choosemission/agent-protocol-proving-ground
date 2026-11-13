@@ -7,6 +7,9 @@
  * binding is a `jwt` proof carrying a did:key `kid` or a `jwk` (D-003). The signing
  * lives in issuer.ts.
  */
+import { ECDH } from 'node:crypto';
+import { multibaseDecode } from 'didwebvh-ts';
+import type { JWK } from 'jose';
 import { BASE_URL, ORIGIN } from './lab.ts';
 import { VCT } from './issuer.ts';
 import * as store from './store.ts';
@@ -78,4 +81,22 @@ export async function serve(method: string, path: string, headers: Record<string
   // Not a protected resource (§7.1): no token needed.
   if (path === '/nonce') return { status: 200, body: { c_nonce: store.mintVci('nonce', null, 300) }, headers: NO_STORE };
   return null;
+}
+
+/**
+ * A did:key DID URL's public key as a JWK: Ed25519 (`z6Mk…`, multicodec 0xed) or
+ * P-256 (`zDn…`, 0x1200, compressed point). The fragment must be the key's own
+ * multibase, as did:key defines it. Throws on anything else.
+ */
+export function didKeyToJwk(kid: string): JWK {
+  const m = /^did:key:(z[1-9A-HJ-NP-Za-km-z]+)#(z[1-9A-HJ-NP-Za-km-z]+)$/.exec(kid);
+  if (!m) throw new Error('kid must be a did:key DID URL: did:key:<multibase>#<multibase>.');
+  if (m[1] !== m[2]) throw new Error("A did:key kid's fragment must be the key's own multibase.");
+  const b = Buffer.from(multibaseDecode(m[1]).bytes);
+  if (b[0] === 0xed && b[1] === 0x01 && b.length === 34) return { kty: 'OKP', crv: 'Ed25519', x: b.subarray(2).toString('base64url') };
+  if (b[0] === 0x80 && b[1] === 0x24 && b.length === 35) {
+    const point = ECDH.convertKey(b.subarray(2), 'prime256v1', undefined, undefined, 'uncompressed') as Buffer;
+    return { kty: 'EC', crv: 'P-256', x: point.subarray(1, 33).toString('base64url'), y: point.subarray(33).toString('base64url') };
+  }
+  throw new Error('Only Ed25519 (z6Mk…) and P-256 (zDn…) did:key are supported.');
 }

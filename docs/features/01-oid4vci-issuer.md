@@ -40,7 +40,7 @@ Spec: [OpenID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-i
 - [x] 4. Nonce endpoint
       Criteria: `POST /nonce` → `{c_nonce}` with `Cache-Control: no-store`. The nonce is stored, single use, and valid for 5 minutes. It needs no access token.
       Test: two calls return different nonces.
-- [ ] 5. did:key → JWK
+- [x] 5. did:key → JWK
       Criteria: `didKeyToJwk(kid)` accepts `did:key:z6Mk…#z6Mk…` (Ed25519 → OKP) and `did:key:zDn…#zDn…` (P-256 → EC). P-256 decompresses the point with `crypto.ECDH.convertKey`. A fragment that isn't the key's own multibase is refused, and so are other multicodecs. No new dependency: base58btc is about 15 lines.
       Test: unit tests against the [did:key spec test vectors](https://w3c-ccg.github.io/did-key-spec/) for both key types. A tampered fragment throws.
 - [ ] 6. Credential endpoint
