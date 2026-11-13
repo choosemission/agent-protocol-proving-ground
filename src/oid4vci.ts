@@ -9,6 +9,7 @@
  */
 import { BASE_URL, ORIGIN } from './lab.ts';
 import { VCT } from './issuer.ts';
+import * as store from './store.ts';
 
 /** The Credential Issuer Identifier. Every endpoint sits under it. */
 export const CREDENTIAL_ISSUER = `${BASE_URL}/pg/issuer`;
@@ -44,3 +45,13 @@ export const WELL_KNOWN = {
 
 /** Where a client finds the issuer metadata: for docs and hints. */
 export const METADATA_URL = `${ORIGIN}${wellKnown('openid-credential-issuer')}`;
+
+/** A fresh credential offer for a run: a single-use pre-authorized code, good for 10 minutes. */
+export function offer(runId: string) {
+  const credential_offer = {
+    credential_issuer: CREDENTIAL_ISSUER,
+    credential_configuration_ids: [CONFIG_ID],
+    grants: { [PRE_AUTH]: { 'pre-authorized_code': store.mintVci('code', runId, 600) } },
+  };
+  return { credential_offer, credential_offer_uri_scheme: `openid-credential-offer://?credential_offer=${encodeURIComponent(JSON.stringify(credential_offer))}` };
+}

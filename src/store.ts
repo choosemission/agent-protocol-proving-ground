@@ -140,3 +140,32 @@ export function wallState(door: string, throughStep: number) {
     stopped: all('select error, count(*) n from attempts where door = ? and error is not null group by error order by n desc', door),
   };
 }
+
+// OpenID4VCI: pre-authorized codes and nonces (single use) and access tokens (reused until they expire).
+db.exec(`create table if not exists vci (
+  value text primary key,
+  kind text not null,
+  run_id text references runs(id),
+  expires integer not null,
+  used integer not null default 0
+)`);
+
+/** Mints a random value of `kind`, good for `ttlS` seconds. Clears expired rows, since /nonce is anonymous. */
+export function mintVci(kind: 'code' | 'token' | 'nonce', runId: string | null, ttlS: number) {
+  const t = Math.floor(Date.now() / 1000);
+  db.prepare('delete from vci where expires <= ?').run(t);
+  const value = id(32);
+  db.prepare('insert into vci (value, kind, run_id, expires) values (?, ?, ?, ?)').run(value, kind, runId, t + ttlS);
+  return value;
+}
+
+/** Spends an unexpired, unspent value of `kind`. Returns its run ID ('' for none), or null if it can't be spent. */
+export function spendVci(kind: 'code' | 'nonce', value: string) {
+  const row = db.prepare('update vci set used = 1 where value = ? and kind = ? and used = 0 and expires > ? returning run_id')
+    .get(value, kind, Math.floor(Date.now() / 1000)) as { run_id: string | null } | undefined;
+  return row ? row.run_id ?? '' : null;
+}
+
+/** The run an unexpired access token belongs to, or null. */
+export const tokenRun = (value: string) =>
+  (db.prepare("select run_id from vci where value = ? and kind = 'token' and expires > ?").get(value, Math.floor(Date.now() / 1000)) as { run_id: string } | undefined)?.run_id ?? null;

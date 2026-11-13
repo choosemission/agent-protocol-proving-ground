@@ -25,7 +25,7 @@ Spec: [OpenID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-i
 - [x] 1. Issuer metadata and AS metadata
       Criteria: the two documents above are served at the origin paths, registered through `WELL_KNOWN` in `server.ts` (the same mechanism poppy uses). `credential_issuer` equals the identifier exactly, and every endpoint URL sits under it. A new `src/oid4vci.ts` holds this and later tasks; `issuer.ts` keeps the signing.
       Test: `node --test test/oid4vci.test.ts`: both GETs return 200 JSON, and the issuer document's `credential_issuer` + `/credential` equals `credential_endpoint`.
-- [ ] 2. Credential offer on run creation
+- [x] 2. Credential offer on run creation
       Criteria: `POST /pg/runs` adds `credential_offer` and `credential_offer_uri_scheme`.
       - `credential_offer` is `{credential_issuer, credential_configuration_ids: ["lab_handle"], grants: {"urn:ietf:params:oauth:grant-type:pre-authorized_code": {"pre-authorized_code"}}}`.
       - `credential_offer_uri_scheme` is the `openid-credential-offer://?credential_offer=…` form.

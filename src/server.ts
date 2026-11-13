@@ -246,8 +246,15 @@ async function route(req: IncomingMessage, res: ServerResponse) {
       run: run.id,
       doors: Object.fromEntries(Object.keys(DOORS).map((d) => [d, `${BASE_URL}/pg/doors/${d}/r/${run.id}`])),
       credential: `POST {"jwk": <your holder public JWK>, "run": "${run.id}"} to ${BASE_URL}/pg/issuer/credential for a credential attesting your handle.`,
+      ...oid4vci.offer(run.id),
       note: 'Point your agent at a door URL. The run ID labels attempts on your row and gets your handle credential; start a new run if it leaks.',
     });
+  }
+
+  const offerMatch = /^\/pg\/runs\/([A-Za-z0-9_-]{22})\/offer$/.exec(p);
+  if (m === 'GET' && offerMatch) {
+    if (!store.runExists(offerMatch[1])) return send(res, 404, { error: 'unknown_run', message: `No run with that ID. ${START} to start one.` });
+    return send(res, 200, oid4vci.offer(offerMatch[1]), { 'Cache-Control': 'no-store' });
   }
 
   if (m === 'POST' && p === '/pg/issuer/credential') {
