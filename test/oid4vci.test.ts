@@ -208,3 +208,20 @@ test('credential: refusals', async () => {
   await refused(await askWith(expired, await proof(h, 'kid', await nonce())), 401, 'invalid_token');
   await refused(await askWith('not-a-token', await proof(h, 'kid', await nonce())), 401, 'invalid_token');
 });
+
+// The credentials wallet's create_key_proof (profile openid4vci, its D36): header exactly
+// {alg, kid: did:key:X#X, typ}, payload exactly {aud, iat, nonce}, no iss. Built here, no real keys.
+for (const kind of ['Ed25519', 'ES256'] as const) {
+  test(`credential: a ${kind} proof shaped like the credentials wallet's is accepted`, async () => {
+    const h = await holderKey(kind);
+    const jwt = await new SignJWT({ aud: ISSUER, iat: Math.floor(Date.now() / 1000), nonce: await nonce() })
+      .setProtectedHeader({ alg: h.alg, kid: h.kid, typ: 'openid4vci-proof+jwt' })
+      .sign(h.privateKey);
+    const [header, payload] = jwt.split('.').slice(0, 2).map((p) => Object.keys(JSON.parse(Buffer.from(p, 'base64url').toString())).sort());
+    assert.deepEqual(header, ['alg', 'kid', 'typ']);
+    assert.deepEqual(payload, ['aud', 'iat', 'nonce']);
+    const res = await askWith(await accessToken(), jwt);
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.deepEqual(decodeJwt((await res.json()).credentials[0].credential.split('~')[0]).cnf, { jwk: h.jwk });
+  });
+}

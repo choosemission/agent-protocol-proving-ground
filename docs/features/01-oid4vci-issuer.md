@@ -50,7 +50,7 @@ Spec: [OpenID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-i
       - On success it issues with `issueCredential(holderJwk, handle)`, which puts `cnf.jwk` = `{kty, crv, x, y}`, and responds `{credentials: [{credential}]}`.
       - Errors, from the spec's Credential Error Response: `invalid_token` (401), `invalid_credential_request`, `unknown_credential_configuration`, `invalid_proof`, `invalid_nonce`.
       Test: four happy paths, with proofs signed via `jose` as did:key Ed25519, did:key P-256, `jwk` P-256 and `jwk` Ed25519. Each credential's `cnf.jwk` matches the proof key. Refusal cases: wrong `typ`, wrong `aud`, a reused nonce, an unknown nonce, an expired token, no token, a `kid` fragment mismatch, and a JWK with `d`.
-- [ ] 7. Proof shaped like the credentials wallet's
+- [x] 7. Proof shaped like the credentials wallet's
       Criteria: a proof built exactly as the wallet's `create_key_proof` (`profile: openid4vci`, D36) is accepted:
       - header exactly `{alg, kid: did:key:X#X, typ}`;
       - payload exactly `{aud, iat, nonce}`, with no `iss`.
