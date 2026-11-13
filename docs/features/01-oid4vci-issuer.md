@@ -60,7 +60,7 @@ Spec: [OpenID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-i
 - [x] 8. Move `client.ts` to OpenID4VCI and remove the plain POST
       Criteria: `getCredential` in `client.ts` runs offer → token → nonce → proof → credential. `POST /pg/issuer/credential` returns 404 (as built: that path is now the OpenID4VCI credential endpoint, so the old `{jwk, run}` POST gets `401 invalid_token`). The README's "The handle credential" section, `/llms.txt` text and the run response's `credential` hint all describe the offer flow. `x401.md` step 2 points at it. The README's "Not built yet" loses "Issuance: OpenID4VCI".
       Test: `npm test` (all of e2e x401, poppy and aauth) green, and `npm run typecheck` clean.
-- [ ] 9. Deploy to the Lab
+- [x] 9. Deploy to the Lab
       Criteria: in affinidi-lab:
       - Add both well-known paths to `@lab_identity` in `infra/agent-services/caddy/Caddyfile`.
       - Bump the proving-ground pin in `compose.yaml`.
