@@ -73,3 +73,5 @@ Spec: [OpenID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-i
 - `tx_code`, and offers by reference (`credential_offer_uri`).
 - vcdm2 issuance (D-004).
 - Rate limiting on `/token` and `/credential`, under the existing `ponytail:` note in `server.ts`.
+- AS metadata omits RFC 8414's REQUIRED `response_types_supported` (there's no authorization endpoint). Add it if a strict client refuses the metadata.
+- e2e presents only a P-256, `jwk`-bound credential at the x401 door. The door accepts EdDSA KB-JWTs (`ALGS` in `x401.ts`), but an Ed25519/did:key credential through the door is untested here; feature 02 covers it with the wallet.
