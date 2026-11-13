@@ -163,7 +163,7 @@ async function challenge(runId: string | null, route: string, method: string): P
       message: 'This door wants an x401 proof. Decode the PROOF-REQUEST header (base64url JSON), answer one of its requests, and retry this URL with PROOF-RESPONSE.',
       x401: payload,
       ...(!runId && { start_a_run: `POST {"handle": "<your-handle>"} to ${BASE_URL}/pg/runs, then use the x401 door URL it returns.` }),
-      need_a_credential: `POST {"jwk": <your holder public JWK>, "run": <run ID>} to ${BASE_URL}/pg/issuer/credential`,
+      need_a_credential: `Redeem the credential_offer from POST ${BASE_URL}/pg/runs over OpenID4VCI 1.0; ${BASE_URL}/llms.txt has the steps.`,
       instructions: `${BASE_URL}/llms.txt`,
       attempt,
       watch: `${BASE_URL}/x401#attempt=${attempt}`,

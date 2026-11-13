@@ -1,10 +1,11 @@
 /**
  * The Lab test issuer, shared by every door: the Lab's did:webvh, signing with its #issuer key. It gives a run an SD-JWT VC
  * (dc+sd-jwt) attesting the run's handle, bound to the holder key the caller
- * sends. The handle is selectively disclosable.
+ * proved it holds. The handle is selectively disclosable. oid4vci.ts serves it
+ * over OpenID4VCI.
  *
- * Asking needs the run ID, which is what the run's door URLs carry, so the
- * credential says no more than "this holder was given the run with this handle".
+ * The offer comes with the run, so the credential says no more than "this
+ * holder was given the run with this handle".
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { SignJWT, type JWK } from 'jose';
@@ -18,7 +19,7 @@ export const digest = (s: string) => createHash('sha256').update(s).digest('base
 /** Throws on a holder key that is not a public EC or OKP JWK. */
 export async function issueCredential(holder: JWK, handle: string) {
   if (!holder || typeof holder !== 'object' || 'd' in holder || !['EC', 'OKP'].includes(holder.kty ?? '')) {
-    throw new Error('Send {"jwk": <your holder public key>, "run": <run ID>} with an EC or OKP JWK without "d".');
+    throw new Error('The holder key must be a public EC or OKP JWK, without "d".');
   }
   const { kty, crv, x, y } = holder;
   const disclosure = Buffer.from(JSON.stringify([randomBytes(16).toString('base64url'), 'handle', handle])).toString('base64url');

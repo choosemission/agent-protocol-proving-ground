@@ -9,8 +9,9 @@
  * 2. Take the signed entry, resolve the door's did:webvh (checking its whole log)
  *    and check the JAR against the key it names
  *    (or, with --unsigned, the unsigned entry).
- * 3. Get the run's handle credential from the Lab issuer, using the run ID in
- *    the door URL. A real wallet already holds one.
+ * 3. Get the run's handle credential from the Lab issuer over OpenID4VCI, from
+ *    a fresh credential offer for the run ID in the door URL. A real wallet
+ *    already holds one.
  * 4. Disclose only the claims the DCQL query names, and sign a KB-JWT
  *    binding the presentation to the nonce and the audience.
  * 5. Retry the door with PROOF-RESPONSE and print what came back.
@@ -31,10 +32,39 @@ export async function newHolder() {
   return { key: privateKey, jwk: await exportJWK(publicKey) };
 }
 
-export async function getCredential(origin: string, jwk: unknown, run: string): Promise<string> {
-  const res = await fetch(`${origin}/pg/issuer/credential`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jwk, run }) });
-  if (!res.ok) throw new Error(`issuer said ${res.status}: ${await res.text()}`);
-  return (await res.json()).credential;
+export type CredentialOffer = { credential_issuer: string; credential_configuration_ids: string[]; grants: Record<string, { 'pre-authorized_code': string }> };
+const PRE_AUTH = 'urn:ietf:params:oauth:grant-type:pre-authorized_code';
+
+/**
+ * OpenID4VCI 1.0, pre-authorized code flow, from the credential offer alone: issuer
+ * metadata → token → nonce → credential, with a `jwt` proof binding the holder key.
+ */
+export async function getCredential(offer: CredentialOffer, holder: { key: CryptoKey; jwk: JWK }): Promise<string> {
+  const json = async (res: Response) => {
+    if (!res.ok) throw new Error(`${res.url} said ${res.status}: ${await res.text()}`);
+    return res.json();
+  };
+  // The well-known part goes between the host and the identifier's path (§12.2.2, RFC 8414 §3.1).
+  const id = new URL(offer.credential_issuer);
+  const wellKnown = (name: string) => `${id.origin}/.well-known/${name}${id.pathname.replace(/\/$/, '')}`;
+  const md = await json(await fetch(wellKnown('openid-credential-issuer')));
+  if (md.credential_issuer !== offer.credential_issuer) throw new Error(`metadata is for ${md.credential_issuer}, not ${offer.credential_issuer}`);
+  const as = await json(await fetch(wellKnown('oauth-authorization-server')));
+  const code = offer.grants[PRE_AUTH]['pre-authorized_code'];
+  const { access_token } = await json(await fetch(as.token_endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: PRE_AUTH, 'pre-authorized_code': code }),
+  }));
+  const { c_nonce } = await json(await fetch(md.nonce_endpoint, { method: 'POST' }));
+  const proof = await new SignJWT({ aud: md.credential_issuer, nonce: c_nonce })
+    .setProtectedHeader({ alg: 'ES256', typ: 'openid4vci-proof+jwt', jwk: holder.jwk })
+    .setIssuedAt()
+    .sign(holder.key);
+  const { credentials } = await json(await fetch(md.credential_endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${access_token}` },
+    body: JSON.stringify({ credential_configuration_id: offer.credential_configuration_ids[0], proofs: { jwt: [proof] } }),
+  }));
+  return credentials[0].credential;
 }
 
 /** GETs the door; returns the x401 payload, the verified signed request, and the unsigned one. */
@@ -83,6 +113,7 @@ async function main() {
   if (!run) throw new Error("usage: node client.ts <run's x401 door URL> [--unsigned]  (POST /pg/runs to start a run)");
   const unsigned = process.argv.includes('--unsigned');
   const origin = new URL(doorUrl).origin;
+  const base = doorUrl.slice(0, doorUrl.indexOf('/pg/doors/'));
 
   const { signed, unsigned: plain } = await challenge(doorUrl);
   const request = unsigned ? plain : signed;
@@ -90,7 +121,8 @@ async function main() {
   console.log(`← 401 PROOF-REQUEST; using the ${unsigned ? 'unsigned' : 'signed'} entry, nonce ${request.nonce}`);
 
   const holder = await newHolder();
-  const credential = await getCredential(origin, holder.jwk, run);
+  const offer = await (await fetch(`${base}/pg/runs/${run}/offer`)).json();
+  const credential = await getCredential(offer.credential_offer, holder);
   const disclose = query.claims.map((c) => c.path[0]);
   const presentation = await present(credential, holder.key, { nonce: request.nonce, aud: unsigned ? `origin:${origin}` : request.client_id!, disclose });
   console.log(`→ retry with PROOF-RESPONSE, disclosing ${disclose.join(', ')}`);

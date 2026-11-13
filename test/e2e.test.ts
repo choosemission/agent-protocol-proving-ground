@@ -39,7 +39,7 @@ before(async () => {
   if (!server.listening) await once(server, 'listening');
   const run = await startRun('test-team');
   door = run.doors.x401;
-  credential = await getCredential(BASE, holder.jwk, run.run);
+  credential = await getCredential(run.credential_offer, holder);
 });
 
 /** One full attempt; `tweak` changes what the wallet sends. */
@@ -159,12 +159,14 @@ test('withholding the handle stops at query met', async () => {
 
 test("another run's handle credential stops at query met", async () => {
   const other = await startRun('other-team');
-  await stopsAt('query met', 'query_not_met', await attempt({ credential: await getCredential(BASE, holder.jwk, other.run) }));
+  await stopsAt('query met', 'query_not_met', await attempt({ credential: await getCredential(other.credential_offer, holder) }));
 });
 
-test('the issuer refuses without a known run', async () => {
-  const res = await fetch(`${BASE}/pg/issuer/credential`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jwk: holder.jwk, run: 'nope' }) });
-  assert.equal(res.status, 400);
+test('the plain POST is gone: a JWK and a run ID with no token get nothing', async () => {
+  const run = await startRun('plain-post');
+  const res = await fetch(`${BASE}/pg/issuer/credential`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jwk: holder.jwk, run: run.run }) });
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, 'invalid_token');
 });
 
 test('a foreign issuer with x5c stops at issuer trusted', async () => {
@@ -308,7 +310,7 @@ test('an agent can find its way in without running JavaScript', async () => {
   assert.match(home, /\/pg\/doors\/x401/);
   assert.ok(home.includes(`href="/proving-ground/llms.txt"`) && home.includes(`href="/proving-ground/x401"`), 'links carry the prefix');
   const llms = await (await fetch(`${BASE}/llms.txt`)).text();
-  for (const s of ['/pg/runs', '/pg/issuer/credential', '/pg/doors/x401/r/<run ID>', 'proof/x401@7e864af']) assert.ok(llms.includes(s), s);
+  for (const s of ['/pg/runs', '/.well-known/openid-credential-issuer/proving-ground/pg/issuer', 'credential_offer', '/pg/doors/x401/r/<run ID>', 'proof/x401@7e864af']) assert.ok(llms.includes(s), s);
   const anon = await (await fetch(`${BASE}/pg/doors/x401`)).json();
   assert.match(anon.start_a_run, /\/pg\/runs/);
   assert.equal(anon.instructions, `${BASE}/llms.txt`);

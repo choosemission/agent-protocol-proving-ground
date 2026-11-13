@@ -73,15 +73,28 @@ the wall, and a leaked one means starting a new run.
 
 ## The handle credential
 
-The Lab test issuer, shared by every door, attests the run's handle:
+The Lab test issuer, shared by every door, attests the run's handle over
+[OpenID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html)
+(final), pre-authorized code flow ([src/oid4vci.ts](src/oid4vci.ts)). The run's
+response carries a `credential_offer` (and the same as an `openid-credential-offer://`
+URI). Its code is single use and lasts 10 minutes; `GET /pg/runs/<run>/offer` mints
+a fresh one. From the offer, a wallet does what the spec says:
 
-```sh
-curl -X POST pg.localhost:8401/pg/issuer/credential -H 'content-type: application/json' \
-  -d '{"jwk": <holder public JWK>, "run": "<run>"}'
-# → {"format": "dc+sd-jwt", "credential": "<sd-jwt>", "issuer": "did:webvh:<scid>:<host>"}
-```
+1. Read the issuer metadata at `/.well-known/openid-credential-issuer/pg/issuer` and the
+   AS metadata at `/.well-known/oauth-authorization-server/pg/issuer`: at the origin, with
+   `BASE_URL`'s path after the well-known part (on the Lab,
+   `/.well-known/openid-credential-issuer/proving-ground/pg/issuer`).
+2. `POST /pg/issuer/token` with the pre-authorized code (anonymous; no `tx_code`, no DPoP).
+3. `POST /pg/issuer/nonce` for a `c_nonce`.
+4. `POST /pg/issuer/credential` with the bearer token and
+   `{"credential_configuration_id": "lab_handle", "proofs": {"jwt": [<proof>]}}`. The proof is
+   typed `openid4vci-proof+jwt`, ES256 or EdDSA, with `aud` = the issuer identifier
+   (`<BASE_URL>/pg/issuer`), the `c_nonce`, and either `kid` (an Ed25519 or P-256
+   did:key DID URL) or `jwk`.
 
-An SD-JWT VC of vct `<BASE_URL>/pg/vct/handle`, bound to the holder key
+`getCredential` in [client.ts](client.ts) does exactly this. The result,
+`{"credentials": [{"credential": "<sd-jwt>"}]}`, is an SD-JWT VC of vct
+`<BASE_URL>/pg/vct/handle`, bound to the proof's key
 (`cnf.jwk`), with one selectively disclosable claim, `handle`. The issuer
 is the Lab's did:webvh (the same DID the doors verify as), signing with its
 `#issuer` key; resolve it from `/.well-known/did.jsonl`. A door that asks for
@@ -100,6 +113,7 @@ handles, never run IDs.
 | --- | --- |
 | [`src/doors/`](src/doors) | One door per protocol: its challenge, ladder of checks and receipt, and its docs. The aauth door is three files: the resource, its verifier (`aauth-sig.ts`) and the Lab test person server (`aauth-ps.ts`) |
 | [`src/issuer.ts`](src/issuer.ts) | The Lab test issuer: the handle credential |
+| [`src/oid4vci.ts`](src/oid4vci.ts) | OpenID4VCI 1.0 for that issuer: metadata, offers, token, nonce, credential |
 | [`src/store.ts`](src/store.ts) | Runs and attempts in SQLite (`node:sqlite`), and the change bus |
 | [`src/lab.ts`](src/lab.ts) | Base URL, `did:webvh` (served at `/.well-known/did.jsonl`, with a parallel `did:web`), signing keys |
 | [`src/server.ts`](src/server.ts) | Routes, the door registry, CORS, SSE |
@@ -132,6 +146,5 @@ Each of these is left out on purpose, and each would take a small change.
   needs deciding, along with the privacy check (decision 6 in the plan).
 - **Lab integration:** Lab sign-in for runs, six-digit completion codes,
   and Slack "first through" notices.
-- **Issuance:** OpenID4VCI. The issuer is a plain POST for now.
 - **Wall:** the per-door interop grid (declared software against route),
   *My attempts*, and the archived snapshot after each event.

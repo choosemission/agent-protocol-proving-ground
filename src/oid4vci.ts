@@ -46,8 +46,9 @@ export const WELL_KNOWN = {
   }),
 };
 
-/** Where a client finds the issuer metadata: for docs and hints. */
+/** Where a client finds the issuer and AS metadata: for docs and hints. */
 export const METADATA_URL = `${ORIGIN}${wellKnown('openid-credential-issuer')}`;
+export const AS_METADATA_URL = `${ORIGIN}${wellKnown('oauth-authorization-server')}`;
 
 /** A fresh credential offer for a run: a single-use pre-authorized code, good for 10 minutes. */
 export function offer(runId: string) {

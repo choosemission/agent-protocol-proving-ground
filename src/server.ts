@@ -12,7 +12,8 @@
  *   GET|POST /pg/doors/<door>/r/<run>    a door, on a run's row of the wall
  *   GET      /.well-known/...            documents a door claims (WELL_KNOWN), such as poppy.json and aauth-resource.json
  *   POST     /pg/runs                    start a run: {"handle": "...", "client_id"?: "<Personal Agent client_id>"}
- *   POST     /pg/issuer/credential       get the run's handle credential: {"jwk": <holder public JWK>, "run": <run ID>}
+ *   GET      /pg/runs/<run>/offer        a fresh OpenID4VCI credential offer for the run's handle credential
+ *   POST     /pg/issuer/{token,nonce,credential}  the OpenID4VCI issuer (oid4vci.ts); its metadata is at /.well-known
  *   GET      /pg/state, /pg/events       the wall's data, and a ping on every change (SSE)
  *   GET      /pg/attempts/<id>           one attempt's timeline
  *   GET      /pg/jwks.json               verifier and issuer keys (verify receipts here)
@@ -23,7 +24,6 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { BASE_URL, DID, ORIGIN, PORT, PREFIX, didLogText, didWebDocument, issuer, verifier } from './lab.ts';
-import { issueCredential } from './issuer.ts';
 import * as store from './store.ts';
 import * as x401 from './doors/x401.ts';
 import * as poppy from './doors/poppy.ts';
@@ -119,11 +119,21 @@ and one URL per door. The run ID labels your attempts; don't publish it.
 
 ## 2. Get your handle credential
 
-POST {"jwk": <your holder public JWK, EC or OKP, no "d">, "run": "<run ID>"} to ${BASE_URL}/pg/issuer/credential
+The run's response carries credential_offer: an OpenID4VCI 1.0 credential
+offer (pre-authorized code flow, no tx_code). Redeem it as the spec says:
+https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html
 
-The Lab test issuer returns {"format": "dc+sd-jwt", "credential": "<sd-jwt>",
-"issuer": "${DID}"}: an SD-JWT VC attesting your run's handle, bound to
-your key, with handle selectively disclosable. Doors that
+- Issuer metadata (nonce and credential endpoints): ${oid4vci.METADATA_URL}
+- Authorization server metadata (token endpoint): ${oid4vci.AS_METADATA_URL}
+- Prove your key
+  with a jwt proof (typ openid4vci-proof+jwt, ES256 or EdDSA) carrying either
+  "kid" (a did:key DID URL) or "jwk", aud = ${oid4vci.CREDENTIAL_ISSUER}, and
+  the c_nonce from the nonce endpoint.
+- The code is single use and lasts 10 minutes; GET ${BASE_URL}/pg/runs/<run ID>/offer
+  for a fresh offer.
+
+You get a dc+sd-jwt credential: an SD-JWT VC attesting your run's handle,
+bound to your key, with handle selectively disclosable. Doors that
 ask for a credential ask for this one. The issuer is the Lab's did:webvh; its
 signing key is ${issuer.kid}, in the DID log at ${ORIGIN}/.well-known/did.jsonl
 
@@ -245,7 +255,7 @@ async function route(req: IncomingMessage, res: ServerResponse) {
       handle,
       run: run.id,
       doors: Object.fromEntries(Object.keys(DOORS).map((d) => [d, `${BASE_URL}/pg/doors/${d}/r/${run.id}`])),
-      credential: `POST {"jwk": <your holder public JWK>, "run": "${run.id}"} to ${BASE_URL}/pg/issuer/credential for a credential attesting your handle.`,
+      credential: `credential_offer is an OpenID4VCI 1.0 offer for a credential attesting your handle (pre-authorized code, single use, 10 minutes). GET ${BASE_URL}/pg/runs/${run.id}/offer for a fresh one.`,
       ...oid4vci.offer(run.id),
       note: 'Point your agent at a door URL. The run ID labels attempts on your row and gets your handle credential; start a new run if it leaks.',
     });
@@ -257,21 +267,9 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     return send(res, 200, oid4vci.offer(offerMatch[1]), { 'Cache-Control': 'no-store' });
   }
 
-  // Until task 8 removes it, the plain POST keeps /pg/issuer/credential when there's no bearer token.
-  if (p.startsWith('/pg/issuer/') && !(p === '/pg/issuer/credential' && !req.headers.authorization)) {
+  if (p.startsWith('/pg/issuer/')) {
     const r = await oid4vci.serve(m ?? '', p.slice('/pg/issuer'.length), req.headers, m === 'POST' ? (await readBody(req)).toString('utf8') : '');
     if (r) return send(res, r.status, r.body, r.headers);
-  }
-
-  if (m === 'POST' && p === '/pg/issuer/credential') {
-    const { jwk, run } = await readJson(req);
-    const handle = typeof run === 'string' ? store.handleOf(run) : null;
-    if (!handle) return send(res, 400, { error: 'unknown_run', message: `Send {"jwk": ..., "run": <run ID>}. ${START} to get a run ID.` });
-    try {
-      return send(res, 200, { format: 'dc+sd-jwt', credential: await issueCredential(jwk, handle), issuer: DID });
-    } catch (e) {
-      return send(res, 400, { error: 'invalid_request', message: (e as Error).message });
-    }
   }
 
   send(res, 404, { error: 'not_found' });

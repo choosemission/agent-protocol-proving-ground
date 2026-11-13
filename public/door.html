@@ -121,7 +121,7 @@
     $('ladder').innerHTML = s.ladder.map((st) => `<li><a href="${esc(st.url)}">${esc(st.name)}</a></li>`).join('');
     const origin = location.origin;
     $('anon-door').textContent = `curl -i ${origin}{{root}}/pg/doors/${s.door}`;
-    $('howto').textContent = s.try ?? `curl -X POST ${origin}{{root}}/pg/issuer/credential \\\n  -H 'content-type: application/json' -d '{"jwk": <holder public JWK>, "run": <run ID>}'\n\nnode client.ts <your door URL> [--unsigned]`;
+    $('howto').textContent = s.try ?? `curl -X POST ${origin}{{root}}/pg/runs -H 'content-type: application/json' -d '{"handle": "<your-handle>"}'\n# redeem its credential_offer over OpenID4VCI 1.0 (see llms.txt)\n\nnode client.ts <your door URL> [--unsigned]`;
   }
 
   // The prompt a person hands their agent. Built from the door's own state, so each door's names its spec and steps.
