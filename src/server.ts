@@ -28,10 +28,11 @@ import * as store from './store.ts';
 import * as x401 from './doors/x401.ts';
 import * as poppy from './doors/poppy.ts';
 import * as aauth from './doors/aauth.ts';
+import * as oid4vci from './oid4vci.ts';
 
 /** Every door: one protocol each. A door exports INFO, THROUGH and serve(DoorRequest), and may claim WELL_KNOWN documents. */
 const DOORS = { x401, poppy, aauth };
-const WELL_KNOWN: Record<string, () => unknown> = { ...poppy.WELL_KNOWN, ...aauth.WELL_KNOWN };
+const WELL_KNOWN: Record<string, () => unknown> = { ...poppy.WELL_KNOWN, ...aauth.WELL_KNOWN, ...oid4vci.WELL_KNOWN };
 
 const page = (f: string) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8').replaceAll('{{root}}', PREFIX);
 const HOME = page('index.html');
