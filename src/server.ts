@@ -257,6 +257,12 @@ async function route(req: IncomingMessage, res: ServerResponse) {
     return send(res, 200, oid4vci.offer(offerMatch[1]), { 'Cache-Control': 'no-store' });
   }
 
+  // Until task 8 removes it, the plain POST keeps /pg/issuer/credential when there's no bearer token.
+  if (p.startsWith('/pg/issuer/') && !(p === '/pg/issuer/credential' && !req.headers.authorization)) {
+    const r = await oid4vci.serve(m ?? '', p.slice('/pg/issuer'.length), req.headers, m === 'POST' ? (await readBody(req)).toString('utf8') : '');
+    if (r) return send(res, r.status, r.body, r.headers);
+  }
+
   if (m === 'POST' && p === '/pg/issuer/credential') {
     const { jwk, run } = await readJson(req);
     const handle = typeof run === 'string' ? store.handleOf(run) : null;

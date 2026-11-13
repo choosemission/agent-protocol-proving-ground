@@ -67,3 +67,33 @@ test('a run carries a credential offer, and /offer mints another', async () => {
   for (const r of rows) { assert.equal(r.used, 0); assert.ok(r.ttl > 590 && r.ttl <= 600, String(r.ttl)); }
   assert.equal((await fetch(`${BASE}/pg/runs/${'x'.repeat(22)}/offer`)).status, 404);
 });
+
+const form = (o: Record<string, string>) => ({ method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(o).toString() });
+const redeem = (code: string) => fetch(`${ISSUER}/token`, form({ grant_type: PRE_AUTH, 'pre-authorized_code': code }));
+
+test('token: a code buys one access token, once', async () => {
+  const run = await startRun();
+  const second = codeOf(await getJson(`${BASE}/pg/runs/${run.run}/offer`));
+  for (const code of [codeOf(run), second]) {
+    const res = await redeem(code);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const t = await res.json();
+    assert.equal(t.token_type, 'Bearer');
+    assert.equal(t.expires_in, 300);
+    assert.ok(t.access_token.length >= 43);
+    const again = await redeem(code);
+    assert.equal(again.status, 400);
+    assert.equal((await again.json()).error, 'invalid_grant');
+  }
+});
+
+test('token: expired, unknown and wrong-grant requests are refused', async () => {
+  const run = await startRun();
+  db().prepare('update vci set expires = 0 where value = ?').run(codeOf(run));
+  assert.equal((await (await redeem(codeOf(run))).json()).error, 'invalid_grant');
+  assert.equal((await (await redeem('nope')).json()).error, 'invalid_grant');
+  const res = await fetch(`${ISSUER}/token`, form({ grant_type: 'authorization_code', code: 'x' }));
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, 'unsupported_grant_type');
+});

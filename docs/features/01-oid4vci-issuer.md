@@ -32,7 +32,7 @@ Spec: [OpenID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-i
       - The pre-authorized code is random, stored against the run in SQLite (`store.ts`), single use, and valid for 10 minutes.
       - `GET /pg/runs/<run>/offer` mints a fresh offer, for an agent whose code expired.
       Test: the run response has an offer with a 43+ character code. Minting a second offer leaves both codes usable until they're spent.
-- [ ] 3. Token endpoint
+- [x] 3. Token endpoint
       Criteria: the endpoint takes a form-encoded `grant_type=urn:ietf:params:oauth:grant-type:pre-authorized_code&pre-authorized_code=…`.
       - It returns `{access_token, token_type: "Bearer", expires_in: 300}` with `Cache-Control: no-store`. The access token is opaque, stored against the run, and good for 5 minutes.
       - A spent, expired or unknown code gives `400 {error: "invalid_grant"}`, and any other grant type gives `unsupported_grant_type`.

@@ -55,3 +55,25 @@ export function offer(runId: string) {
   };
   return { credential_offer, credential_offer_uri_scheme: `openid-credential-offer://?credential_offer=${encodeURIComponent(JSON.stringify(credential_offer))}` };
 }
+
+type Reply = { status: number; body: unknown; headers?: Record<string, string> };
+const NO_STORE = { 'Cache-Control': 'no-store' };
+const oauthError = (status: number, error: string, error_description: string): Reply => ({ status, body: { error, error_description }, headers: NO_STORE });
+
+/** Token endpoint (RFC 6749 §5, OpenID4VCI §6): a pre-authorized code for a 5-minute opaque access token. */
+function token(body: string): Reply {
+  const form = new URLSearchParams(body);
+  if (form.get('grant_type') !== PRE_AUTH) return oauthError(400, 'unsupported_grant_type', `Only ${PRE_AUTH} is supported.`);
+  const code = form.get('pre-authorized_code');
+  if (!code) return oauthError(400, 'invalid_request', 'Send pre-authorized_code from your credential offer, form-encoded.');
+  const runId = store.spendVci('code', code);
+  if (!runId) return oauthError(400, 'invalid_grant', 'That pre-authorized code is unknown, spent or expired (they last 10 minutes). GET /pg/runs/<run ID>/offer for a fresh offer.');
+  return { status: 200, body: { access_token: store.mintVci('token', runId, 300), token_type: 'Bearer', expires_in: 300 }, headers: NO_STORE };
+}
+
+/** Everything under /pg/issuer. `path` is below it. */
+export async function serve(method: string, path: string, headers: Record<string, string | string[] | undefined>, body: string): Promise<Reply | null> {
+  if (method !== 'POST') return null;
+  if (path === '/token') return token(body);
+  return null;
+}
