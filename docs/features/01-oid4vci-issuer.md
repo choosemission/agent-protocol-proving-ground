@@ -37,7 +37,7 @@ Spec: [OpenID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-i
       - It returns `{access_token, token_type: "Bearer", expires_in: 300}` with `Cache-Control: no-store`. The access token is opaque, stored against the run, and good for 5 minutes.
       - A spent, expired or unknown code gives `400 {error: "invalid_grant"}`, and any other grant type gives `unsupported_grant_type`.
       Test: token OK. The same code twice → `invalid_grant`. An expired code (clock injected, as x401's nonce test does) → `invalid_grant`.
-- [ ] 4. Nonce endpoint
+- [x] 4. Nonce endpoint
       Criteria: `POST /nonce` → `{c_nonce}` with `Cache-Control: no-store`. The nonce is stored, single use, and valid for 5 minutes. It needs no access token.
       Test: two calls return different nonces.
 - [ ] 5. did:key → JWK

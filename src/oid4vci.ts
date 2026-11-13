@@ -75,5 +75,7 @@ function token(body: string): Reply {
 export async function serve(method: string, path: string, headers: Record<string, string | string[] | undefined>, body: string): Promise<Reply | null> {
   if (method !== 'POST') return null;
   if (path === '/token') return token(body);
+  // Not a protected resource (§7.1): no token needed.
+  if (path === '/nonce') return { status: 200, body: { c_nonce: store.mintVci('nonce', null, 300) }, headers: NO_STORE };
   return null;
 }

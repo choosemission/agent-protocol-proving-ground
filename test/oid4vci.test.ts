@@ -97,3 +97,16 @@ test('token: expired, unknown and wrong-grant requests are refused', async () =>
   assert.equal(res.status, 400);
   assert.equal((await res.json()).error, 'unsupported_grant_type');
 });
+
+const nonce = async () => {
+  const res = await fetch(`${ISSUER}/nonce`, { method: 'POST' });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+  return (await res.json()).c_nonce as string;
+};
+
+test('nonce: no token needed, a new one each call', async () => {
+  const [a, b] = [await nonce(), await nonce()];
+  assert.ok(a.length >= 43);
+  assert.notEqual(a, b);
+});
