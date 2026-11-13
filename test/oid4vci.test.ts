@@ -8,7 +8,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createPrivateKey } from 'node:crypto';
+import { ECDH, createPrivateKey } from 'node:crypto';
+import { SignJWT, decodeJwt, exportJWK, generateKeyPair, type JWK } from 'jose';
 import { MultibaseEncoding, multibaseEncode } from 'didwebvh-ts';
 import { after, before, test } from 'node:test';
 
@@ -133,4 +134,77 @@ test('did:key → JWK: P-256 and Ed25519 vectors; bad kids throw', () => {
   assert.throws(() => didKeyToJwk('did:web:example.com#key-1'), /DID URL/);
   const x25519 = 'z6LSj72tK8brWgZja8NLRwPigth2T9QRiG1uH9oKZuKjdh9p';
   assert.throws(() => didKeyToJwk(`did:key:${x25519}#${x25519}`), /Only Ed25519/);
+});
+
+/** A holder key: its public JWK and its did:key DID URL. */
+async function holderKey(kind: 'ES256' | 'Ed25519') {
+  const { privateKey, publicKey } = await generateKeyPair(kind, { extractable: true });
+  const { kty, crv, x, y } = await exportJWK(publicKey);
+  const raw = kind === 'ES256'
+    ? [0x80, 0x24, ...(ECDH.convertKey(Buffer.concat([Buffer.from([4]), Buffer.from(x!, 'base64url'), Buffer.from(y!, 'base64url')]), 'prime256v1', undefined, undefined, 'compressed') as Buffer)]
+    : [0xed, 0x01, ...Buffer.from(x!, 'base64url')];
+  const mb = multibaseEncode(new Uint8Array(raw), MultibaseEncoding.BASE58_BTC);
+  return { privateKey, jwk: (kind === 'ES256' ? { kty, crv, x, y } : { kty, crv, x }) as JWK, kid: `did:key:${mb}#${mb}`, alg: kind === 'ES256' ? 'ES256' : 'EdDSA' };
+}
+type Holder = Awaited<ReturnType<typeof holderKey>>;
+
+/** A key proof as Appendix F.1 describes; `bind` picks kid or jwk, `tweak` breaks it. */
+const proof = (h: Holder, bind: 'kid' | 'jwk', c_nonce: string, tweak: { header?: object; payload?: object } = {}) =>
+  new SignJWT({ aud: ISSUER, nonce: c_nonce, ...tweak.payload })
+    .setProtectedHeader({ alg: h.alg, typ: 'openid4vci-proof+jwt', ...(bind === 'kid' ? { kid: h.kid } : { jwk: h.jwk }), ...tweak.header })
+    .setIssuedAt()
+    .sign(h.privateKey);
+
+async function accessToken() {
+  const run = await startRun();
+  return (await (await redeem(codeOf(run))).json()).access_token as string;
+}
+const ask = (token: string | null, body: unknown) => fetch(`${ISSUER}/credential`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', ...(token !== null && { authorization: `Bearer ${token}` }) },
+  body: JSON.stringify(body),
+});
+const askWith = async (token: string, jwt: string) => ask(token, { credential_configuration_id: 'lab_handle', proofs: { jwt: [jwt] } });
+
+for (const [kind, bind] of [['Ed25519', 'kid'], ['ES256', 'kid'], ['ES256', 'jwk'], ['Ed25519', 'jwk']] as const) {
+  test(`credential: a ${kind} proof bound by ${bind} gets a credential bound to that key`, async () => {
+    const h = await holderKey(kind);
+    const res = await askWith(await accessToken(), await proof(h, bind, await nonce()));
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const { credentials } = await res.json();
+    assert.equal(credentials.length, 1);
+    const vc = decodeJwt(credentials[0].credential.split('~')[0]);
+    assert.deepEqual(vc.cnf, { jwk: h.jwk });
+  });
+}
+
+test('credential: refusals', async () => {
+  const h = await holderKey('ES256');
+  const token = await accessToken();
+  const refused = async (res: Response, status: number, error: string) => {
+    assert.equal(res.status, status);
+    assert.equal((await res.json()).error, error);
+  };
+  await refused(await askWith(token, await proof(h, 'kid', await nonce(), { header: { typ: 'JWT' } })), 400, 'invalid_proof');
+  await refused(await askWith(token, await proof(h, 'kid', await nonce(), { payload: { aud: 'https://elsewhere.example' } })), 400, 'invalid_proof');
+  const n = await nonce();
+  assert.equal((await askWith(token, await proof(h, 'kid', n))).status, 200);
+  await refused(await askWith(token, await proof(h, 'kid', n)), 400, 'invalid_nonce');
+  await refused(await askWith(token, await proof(h, 'kid', 'never-issued')), 400, 'invalid_nonce');
+  const other = (await holderKey('ES256')).kid.split('#')[1];
+  await refused(await askWith(token, await proof(h, 'kid', await nonce(), { header: { kid: `${h.kid.split('#')[0]}#${other}` } })), 400, 'invalid_proof');
+  const { d } = await exportJWK(h.privateKey);
+  await refused(await askWith(token, await proof(h, 'jwk', await nonce(), { header: { jwk: { ...h.jwk, d } } })), 400, 'invalid_proof');
+  await refused(await askWith(token, await proof(h, 'jwk', await nonce(), { header: { kid: h.kid } })), 400, 'invalid_proof');
+  await refused(await ask(token, { credential_configuration_id: 'other', proofs: { jwt: [await proof(h, 'kid', await nonce())] } }), 400, 'unknown_credential_configuration');
+  // A refused proof doesn't spend its nonce, so the holder can retry with it.
+  const kept = await nonce();
+  await refused(await askWith(token, await proof(h, 'kid', kept, { header: { typ: 'JWT' } })), 400, 'invalid_proof');
+  assert.equal((await askWith(token, await proof(h, 'kid', kept))).status, 200);
+
+  const expired = await accessToken();
+  db().prepare('update vci set expires = 0 where value = ?').run(expired);
+  await refused(await askWith(expired, await proof(h, 'kid', await nonce())), 401, 'invalid_token');
+  await refused(await askWith('not-a-token', await proof(h, 'kid', await nonce())), 401, 'invalid_token');
 });

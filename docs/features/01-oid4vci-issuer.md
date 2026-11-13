@@ -43,7 +43,7 @@ Spec: [OpenID4VCI 1.0](https://openid.net/specs/openid-4-verifiable-credential-i
 - [x] 5. did:key → JWK
       Criteria: `didKeyToJwk(kid)` accepts `did:key:z6Mk…#z6Mk…` (Ed25519 → OKP) and `did:key:zDn…#zDn…` (P-256 → EC). P-256 decompresses the point with `crypto.ECDH.convertKey`. A fragment that isn't the key's own multibase is refused, and so are other multicodecs. No new dependency: base58btc is about 15 lines.
       Test: unit tests against the [did:key spec test vectors](https://w3c-ccg.github.io/did-key-spec/) for both key types. A tampered fragment throws.
-- [ ] 6. Credential endpoint
+- [x] 6. Credential endpoint
       Criteria: it takes `Authorization: Bearer <access_token>` and `{credential_configuration_id: "lab_handle", proofs: {jwt: [<proof>]}}`.
       - The proof header must have `typ` = `openid4vci-proof+jwt` and `alg` = ES256 or EdDSA, plus exactly one of `kid` (a did:key DID URL, resolved by task 5) or `jwk` (public).
       - The proof payload needs `aud` = the credential issuer identifier, `nonce` = an unspent `c_nonce` (spent here), and an `iat` within 5 minutes. `iss` is ignored (anonymous pre-auth).

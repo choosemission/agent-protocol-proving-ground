@@ -9,9 +9,9 @@
  */
 import { ECDH } from 'node:crypto';
 import { multibaseDecode } from 'didwebvh-ts';
-import type { JWK } from 'jose';
+import { EmbeddedJWK, decodeProtectedHeader, importJWK, jwtVerify, type JWK } from 'jose';
 import { BASE_URL, ORIGIN } from './lab.ts';
-import { VCT } from './issuer.ts';
+import { VCT, issueCredential } from './issuer.ts';
 import * as store from './store.ts';
 
 /** The Credential Issuer Identifier. Every endpoint sits under it. */
@@ -74,11 +74,57 @@ function token(body: string): Reply {
   return { status: 200, body: { access_token: store.mintVci('token', runId, 300), token_type: 'Bearer', expires_in: 300 }, headers: NO_STORE };
 }
 
+const credError = (error: string, error_description: string): Reply => ({ status: 400, body: { error, error_description }, headers: NO_STORE });
+
+/**
+ * Checks a `jwt` key proof (Appendix F.1) and returns the holder's public JWK. The key is
+ * the header's `jwk`, or its did:key `kid`; never both, never `x5c`. The nonce is spent
+ * by the caller, after the signature checks out.
+ */
+async function checkProof(proof: unknown): Promise<{ jwk: JWK; nonce: string }> {
+  if (typeof proof !== 'string') throw new Error('proofs.jwt must be an array of one JWT.');
+  const h = decodeProtectedHeader(proof);
+  if (h.typ !== 'openid4vci-proof+jwt') throw new Error('The proof header needs typ "openid4vci-proof+jwt".');
+  if (!PROOF_ALGS.includes(h.alg ?? '')) throw new Error(`The proof alg must be one of ${PROOF_ALGS.join(', ')}.`);
+  if (h.x5c || h.trust_chain || h.key_attestation) throw new Error('Bind the key with "kid" (a did:key DID URL) or "jwk"; x5c, trust_chain and key attestations are not supported.');
+  if (!h.kid === !h.jwk) throw new Error('The proof header needs exactly one of "kid" (a did:key DID URL) or "jwk".');
+  const jwk = h.jwk ?? didKeyToJwk(h.kid!);
+  const { payload } = await jwtVerify(proof, h.jwk ? EmbeddedJWK : await importJWK(jwk, h.alg), {
+    typ: 'openid4vci-proof+jwt', algorithms: PROOF_ALGS, audience: CREDENTIAL_ISSUER, maxTokenAge: 300, requiredClaims: ['iat'],
+  });
+  if (typeof payload.nonce !== 'string') throw new Error('The proof needs the c_nonce from the nonce endpoint as "nonce".');
+  return { jwk, nonce: payload.nonce };
+}
+
+/** Credential endpoint (§8): a bearer token and one `jwt` proof for a dc+sd-jwt handle credential bound to the proof's key. */
+async function credential(authorization: string | string[] | undefined, body: string): Promise<Reply> {
+  const bearer = typeof authorization === 'string' ? /^Bearer (\S+)$/i.exec(authorization)?.[1] : undefined;
+  const runId = bearer ? store.tokenRun(bearer) : null;
+  if (!runId) {
+    return { status: 401, body: { error: 'invalid_token', error_description: 'Send Authorization: Bearer <access_token> from the token endpoint; tokens last 5 minutes.' }, headers: { ...NO_STORE, 'WWW-Authenticate': 'Bearer error="invalid_token"' } };
+  }
+  let req: { credential_configuration_id?: unknown; proofs?: { jwt?: unknown } };
+  try { req = JSON.parse(body); } catch { return credError('invalid_credential_request', 'The body must be JSON.'); }
+  if (req?.credential_configuration_id !== CONFIG_ID) {
+    return credError(req?.credential_configuration_id === undefined ? 'invalid_credential_request' : 'unknown_credential_configuration', `Ask for credential_configuration_id "${CONFIG_ID}".`);
+  }
+  const proofs = req.proofs?.jwt;
+  if (!Array.isArray(proofs) || proofs.length !== 1 || Object.keys(req.proofs ?? {}).length !== 1) {
+    return credError('invalid_credential_request', 'Send "proofs": {"jwt": [<one key proof JWT>]}.');
+  }
+  let holder: { jwk: JWK; nonce: string };
+  try { holder = await checkProof(proofs[0]); } catch (e) { return credError('invalid_proof', (e as Error).message); }
+  if (store.spendVci('nonce', holder.nonce) === null) return credError('invalid_nonce', 'That nonce is unknown, spent or expired. POST to the nonce endpoint for a fresh c_nonce.');
+  const handle = store.handleOf(runId)!;
+  return { status: 200, body: { credentials: [{ credential: await issueCredential(holder.jwk, handle) }] }, headers: NO_STORE };
+}
+
 /** Everything under /pg/issuer. `path` is below it. */
 export async function serve(method: string, path: string, headers: Record<string, string | string[] | undefined>, body: string): Promise<Reply | null> {
   if (method !== 'POST') return null;
   if (path === '/token') return token(body);
   // Not a protected resource (§7.1): no token needed.
+  if (path === '/credential') return credential(headers.authorization, body);
   if (path === '/nonce') return { status: 200, body: { c_nonce: store.mintVci('nonce', null, 300) }, headers: NO_STORE };
   return null;
 }
