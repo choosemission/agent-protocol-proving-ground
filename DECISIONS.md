@@ -17,3 +17,13 @@ Context: the credentials wallet resolves did:webvh only on public hosts, with no
 
 ## D-006 2026-11-13 The agent uses the x401 door's unsigned request
 Context: the credentials wallet has no way to verify a JAR (a signed request object). Decision: the holder skill takes `openid4vp-v1-unsigned` and binds to `origin:<origin>`. Why: reading a signed request's payload without verifying it would claim a check that didn't happen. Rejected: decoding the JAR unverified.
+
+## D-007 2026-11-15 The poppy door serves Poppy 1.0 only
+Context: Poppy 1.0 was published on 2026-11-14, and 0.4 before it carried most of the breaking changes from the 0.3 the door implemented. 3.4 lets a Company serve several versions through `supported_versions`. Decision: the door serves 1.0 (any `1.x` request, answered as 1.0), with no `supported_versions`. A 0.3 agent is told why at `version_unsupported`. Why: every door pins one version, and nobody is building to 0.3 now. Rejected: serving 0.3 alongside, which would double the door's code and tests.
+
+## D-008 2026-11-15 The door enforces what a Company MAY, where the agent MUST
+Context: 4.1 says a Personal Agent MUST keep a client assertion to 5 minutes, and a Company MAY reject a longer one. Decision: the door's issuer rejects a client assertion with `exp - iat` over 300 s, with `invalid_client`. Why: the door tests the agent, as its strict assertion `aud` check already does. Rejected: accepting longer assertions, which would let a non-conforming agent through.
+
+## D-009 2026-11-15 A missing `prompt=consent` is noted, not scored
+Context: 4.2 makes `prompt=consent` a MUST unless the agent receives the redirect only on the device that opened the authorization URL, which the door can't observe. Decision: a Direct Sign-In without it, with a redirect URI that isn't loopback, adds a note to the attempt's timeline and carries on. The consent page shows every time anyway. Why: stopping would refuse agents the exception covers. Rejected: refusing with `invalid_request`.
+

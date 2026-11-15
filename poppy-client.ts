@@ -1,5 +1,5 @@
 /**
- * A reference Personal Agent for the poppy door (Personal Agent Protocol 0.3), in one file:
+ * A reference Personal Agent for the poppy door (Personal Agent Protocol 1.0), in one file:
  * the e2e test's driver, and something to read next to the spec.
  *
  *   node poppy-client.ts <proving ground URL> [--handle <h>] [--public-url <https URL that reaches --port>] [--port <n>]
@@ -58,7 +58,8 @@ export type Agent = Awaited<ReturnType<typeof newAgent>>;
 export async function discover(origin: string) {
   const doc = await getJson(`${origin}/.well-known/poppy.json`);
   const host = new URL(origin).host;
-  if (doc.protocol_version !== '0.3') throw new Error(`unsupported protocol_version ${doc.protocol_version}`);
+  // 3.4: this client implements 1.0, so it uses a 1.x document (later minor versions add only what it can ignore).
+  if (!/^1\.\d+$/.test(doc.protocol_version)) throw new Error(`unsupported protocol_version ${doc.protocol_version}`);
   if (String(doc.organization?.domain).toLowerCase() !== host.toLowerCase()) throw new Error(`organization.domain ${doc.organization?.domain} isn't ${host}`);
   const resource = `${new URL(origin).protocol}//${host.toLowerCase()}`;
   const prm = await getJson(`${origin}/.well-known/oauth-protected-resource`);
@@ -102,12 +103,16 @@ export function sessionJwt(s: Session, method: string, url: string, claims: Reco
     .sign(s.key);
 }
 
-/** A request to a Poppy endpoint: Session header always, access token when signed in. */
+/** The protocol version this client implements, sent in Poppy-Version on every Session request (3.4). */
+export const VERSION = '1.0';
+
+/** A request to a Poppy endpoint: Session header and Poppy-Version always, access token when signed in. */
 export async function call(s: Session, method: string, url: string, body?: unknown) {
   const res = await fetch(url, {
     method,
     headers: {
       'Poppy-Session': await sessionJwt(s, method, url),
+      'Poppy-Version': VERSION,
       ...(s.token && { Authorization: `Bearer ${s.token}` }),
       ...(body !== undefined && { 'Content-Type': 'application/json' }),
     },
@@ -116,7 +121,9 @@ export async function call(s: Session, method: string, url: string, body?: unkno
   return { status: res.status, headers: res.headers, body: await res.json() };
 }
 
-export const message = (text: string) => ({ message: { id: `msg_${rand(12)}`, author: { type: 'agent' }, text } });
+/** A request body with a new request ID (8.3); a message's ID is its request's. */
+export const request = <T extends object>(extra: T = {} as T) => ({ id: `req_${rand(12)}`, ...extra });
+export const message = (text: string) => request({ message: { author: { type: 'agent' }, text } });
 
 /** A client assertion (4.1): aud is the issuer, short-lived, unique jti. */
 const assertion = (agent: Agent, issuer: string) =>
@@ -132,7 +139,8 @@ export async function signIn(agent: Agent, company: Company, scope: string, brow
   const state = rand();
   const redirectUri = (agent.metadata.redirect_uris as string[])[0];
   const auth = new URL(company.as.authorization_endpoint);
-  auth.search = new URLSearchParams({ response_type: 'code', client_id: agent.clientId, redirect_uri: redirectUri, scope, state, code_challenge: sha256(verifier), code_challenge_method: 'S256' }).toString();
+  // prompt=consent (4.2): this client may open the URL on another device than the one that gets the redirect.
+  auth.search = new URLSearchParams({ response_type: 'code', client_id: agent.clientId, redirect_uri: redirectUri, scope, state, code_challenge: sha256(verifier), code_challenge_method: 'S256', prompt: 'consent' }).toString();
   const back = new URL(await browser(auth.toString())).searchParams;
   if (back.get('iss') !== company.issuer) throw new Error(`sign-in came back with iss ${back.get('iss')}, not ${company.issuer}`);
   if (back.get('state') !== state) throw new Error('sign-in came back with the wrong state');
@@ -182,7 +190,8 @@ async function main() {
   }).listen(port);
   console.log(`client_id ${agent.clientId}`);
 
-  const company = await discover(origin);
+  // poppy.json is at the origin; runs are under the proving ground's base URL, which may have a path.
+  const company = await discover(new URL(origin).origin);
   console.log(`discovered: issuer ${company.issuer}, endpoint ${company.endpoint}, scopes ${company.scopes.join(' ')}`);
   const run = await getJson(`${origin}/pg/runs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ handle: opt('handle') ?? `agent-${rand(3).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`, client_id: agent.clientId }) });
   console.log('run:', run.handle, run.poppy);
