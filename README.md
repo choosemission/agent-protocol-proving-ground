@@ -12,7 +12,7 @@ It claims nothing about conformance.
 | Door | Protocol | Docs |
 | --- | --- | --- |
 | `x401` | x401 0.2.0 at `proof/x401@7e864af`, OpenID4VP + SD-JWT VC | [src/doors/x401.md](src/doors/x401.md) |
-| `poppy` | Personal Agent Protocol 0.3 at `personal-agent-protocol@6fb46d3`: Session JWTs, conversations, and the door as its own OAuth issuer | [src/doors/poppy.md](src/doors/poppy.md) |
+| `poppy` | Personal Agent Protocol 1.0 at `personal-agent-protocol@8c02b42`: Session JWTs, conversations, and the door as its own OAuth issuer | [src/doors/poppy.md](src/doors/poppy.md) |
 | `aauth` | AAuth Protocol -11 at `dickhardt/AAuth@178e9e6`: signed requests (RFC 9421, Signature-Key), agent, person, resource and auth tokens, with any person server or the Lab test PS | [src/doors/aauth.md](src/doors/aauth.md) |
 
 ## Run it

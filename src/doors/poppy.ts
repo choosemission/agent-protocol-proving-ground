@@ -1,6 +1,6 @@
 /**
- * The poppy door: a Company under Personal Agent Protocol (Poppy) 0.3, as
- * published at personal-agent-protocol@6fb46d3, with a Company Agent that
+ * The poppy door: a Company under Personal Agent Protocol (Poppy) 1.0, as
+ * published and frozen at personal-agent-protocol@8c02b42, with a Company Agent that
  * echoes and, once you sign in, tells you which account you used.
  *
  * Discovery is at /.well-known/poppy.json and /.well-known/oauth-protected-resource.
@@ -8,7 +8,9 @@
  * as a Client ID Metadata Document, so no agent registers anywhere, and signs
  * the User in with a test account (no password; nothing here is a real account).
  *
- * An attempt is one Session (client_id + sid). Each request is walked up
+ * Every Session request carries Poppy-Version, and the door serves 1.x only (3.4).
+ *
+ * An attempt is one Session (client_id + sid + User ID, 5.3). Each request is walked up
  * LADDER; the attempt keeps the highest step it reached. A request stops
  * with the spec's error (invalid_session, invalid_token, conversation_not_found,
  * ...) plus `pg_stop`, the door's finer stop code, and `stopped_at`.
@@ -22,9 +24,9 @@ import { SignJWT, calculateJwkThumbprint, decodeJwt, decodeProtectedHeader, impo
 import { BASE_URL, DEV, DID, ORIGIN, PREFIX, PRIVATE, fetchPublic, verifier, type DoorRequest } from '../lab.ts';
 import * as store from '../store.ts';
 
-const SPEC_URL = 'https://github.com/personal-agent-protocol/personal-agent-protocol/blob/6fb46d381ac1b94265795132af13848ec442b6f6/content/versions/0.3/spec.mdx';
+const SPEC_URL = 'https://github.com/personal-agent-protocol/personal-agent-protocol/blob/8c02b4282eda53468a7c09412558bc8b060d95f6/content/versions/1.0/spec.mdx';
 /** The same text, rendered with anchors. */
-const SPEC_SITE = 'https://personalagentprotocol.org/docs/0.3/spec';
+const SPEC_SITE = 'https://personalagentprotocol.org/docs/1.0/spec';
 
 /** The steps, in the order a Personal Agent meets them. `ref` is the spec section each comes from. */
 export const LADDER = [
@@ -56,20 +58,25 @@ const CONSENT_TTL_S = 600;
 const ID = /^[A-Za-z0-9_-]{1,256}$/;
 const IAT_WINDOW_S = 60;
 const CLIENT_CACHE_MS = 5 * 60_000;
+/** A client assertion lasts at most this long (4.1). */
+const ASSERTION_MAX_S = 300;
+/** The protocol version this door speaks; it serves any 1.x request as 1.0 (3.4). */
+const VERSION = '1.0';
+const DESCRIPTION = "A test Company Agent: it echoes what you say and, once you sign in with scope conversations, tells you which account you used and hands you the door's receipt";
 
 /** Served by the server at these paths (the door claims them). */
 export const WELL_KNOWN = {
   '/.well-known/poppy.json': () => ({
-    protocol_version: '0.3',
+    protocol_version: VERSION,
     organization: { name: 'Agent Lab proving ground', domain: DOMAIN },
     auth: {
       issuer: ISSUER,
       scopes: { [SCOPE]: SCOPE_TEXT },
       scope_hints: { [SCOPE]: { changes: 'none', personal_data: false } },
     },
-    agent: { protocols: [{ type: 'poppy', endpoint: ENDPOINT }] },
+    agent: { protocols: [{ type: 'poppy', endpoint: ENDPOINT, description: DESCRIPTION }] },
   }),
-  '/.well-known/oauth-protected-resource': () => ({ resource: RESOURCE, authorization_servers: [ISSUER] }),
+  '/.well-known/oauth-protected-resource': () => ({ resource: RESOURCE, authorization_servers: [ISSUER], scopes_supported: [SCOPE] }),
   // RFC 8414 §3.1: the well-known segment goes between the host and the issuer's path.
   [`/.well-known/oauth-authorization-server${new URL(ISSUER).pathname}`]: () => ({
     issuer: ISSUER,
@@ -92,7 +99,7 @@ export const WELL_KNOWN = {
 /** Shown on the wall and served at /pg/state. */
 export const INFO = {
   door: 'poppy',
-  spec: { name: 'Personal Agent Protocol', version: '0.3', pinned: 'personal-agent-protocol@6fb46d3', url: SPEC_URL },
+  spec: { name: 'Personal Agent Protocol', version: VERSION, pinned: 'personal-agent-protocol@8c02b42', url: SPEC_URL },
   proves: 'A Personal Agent acting for a signed-in User',
   about: `A Company with a Company Agent at ${ENDPOINT}. Start at /.well-known/poppy.json. Register your client_id with your run; sign in at the door's own issuer, ${ISSUER}, with scope ${SCOPE}.`,
   builds_on: [
@@ -115,6 +122,7 @@ type Reply = { status: number; headers: Record<string, string>; body: unknown };
 /** Every stop: the step it stops at, and the HTTP status and spec error it answers with. */
 const STOPS = {
   no_session: ['session presented', 400, 'invalid_session'],
+  version_unsupported: ['session presented', 400, 'version_unsupported'],
   session_malformed: ['client resolved', 400, 'invalid_session'],
   client_refused: ['client resolved', 400, 'invalid_session'],
   client_metadata_invalid: ['client resolved', 400, 'invalid_session'],
@@ -127,9 +135,8 @@ const STOPS = {
   htu_mismatch: ['session valid', 400, 'invalid_session'],
   iat_out_of_window: ['session valid', 400, 'invalid_session'],
   ath_mismatch: ['session valid', 400, 'invalid_session'],
-  sub_mismatch: ['session valid', 400, 'invalid_session'],
   invalid_request: ['conversation started', 400, 'invalid_request'],
-  message_id_conflict: ['conversation started', 409, 'message_id_conflict'],
+  request_id_conflict: ['conversation started', 409, 'request_id_conflict'],
   conversation_not_found: ['reply read', 404, 'conversation_not_found'],
   conversation_closed: ['reply read', 409, 'conversation_closed'],
   invalid_cursor: ['reply read', 400, 'invalid_cursor'],
@@ -328,6 +335,11 @@ async function authorize(q: URLSearchParams): Promise<Reply> {
   const scopes = [...new Set((q.get('scope') ?? '').split(' ').filter(Boolean))];
   if (!scopes.length || scopes.some((s) => s !== SCOPE)) return error('invalid_scope', `scope is required, and this Company has one: ${SCOPE} (4.7).`);
 
+  // prompt=consent is a MUST unless the redirect comes back only to the device that opened the URL (4.2),
+  // which the door can't see, so its absence is noted, not scored. Every sign-in here shows the consent page.
+  if (!(q.get('prompt') ?? '').split(' ').includes('consent') && !LOOPBACK.test(redirectUri)) {
+    note(clientId, `note: no prompt=consent. A Personal Agent includes it unless it receives the redirect only on the device that opened the authorization URL (4.2).`, true);
+  }
   const id = rand();
   put(consents, id, { client: clientId, scope: scopes.join(' '), redirectUri, state, challenge, exp: expIn(CONSENT_TTL_S) });
   note(clientId, 'consent page shown.', true);
@@ -383,12 +395,16 @@ async function authenticate(form: URLSearchParams): Promise<string> {
     fail('invalid_client', `The client assertion doesn't verify: ${(e as Error).message}`, 401);
   }
   oauth(claims.aud === ISSUER, 'invalid_client', `The assertion's aud must be the issuer, ${ISSUER}, as a single string; got ${JSON.stringify(claims.aud)} (4.1).`, 401);
+  oauth(claims.exp! - claims.iat! <= ASSERTION_MAX_S, 'invalid_client', `A client assertion lasts at most ${ASSERTION_MAX_S} seconds: exp is ${claims.exp! - claims.iat!} seconds after iat (4.1).`, 401);
   return clientId;
 }
 
 /** POST /token: the authorization code (4.2) or a refresh token (4.4) for tokens (4.7). */
 async function token(form: URLSearchParams): Promise<Reply> {
   const clientId = await authenticate(form);
+  // One sign-in covers every resource; a token request names one, or none for the default token (4.5).
+  const resource = form.get('resource');
+  oauth(resource === null || resource === RESOURCE, 'invalid_target', `This Company has one resource, ${RESOURCE}: name it, or no resource, for the default token (4.5).`);
   const issue = (g: Grant, refresh: string, newRefresh: boolean): Reply => {
     const access = rand(32);
     put(accessTokens, access, { ...g, refresh, exp: expIn(ACCESS_TTL_S) });
@@ -450,52 +466,58 @@ async function oauthEndpoint(r: DoorRequest): Promise<Reply> {
 
 // ---- Sessions and conversations ----
 
-type Session = { sub: string; agentId?: unknown; account: string | null; attempt: string; step: number; runId: string | null };
+/** A Session is found by client_id, sid and User ID (5.3): a known sid with another User ID is another Session. */
+type Session = { sub: string; account: string | null; attempt: string; step: number; runId: string | null };
 const sessions = new Map<string, Session>();
 
 type Event = { id: string; type: string; created_at: string; [k: string]: unknown };
-type Conversation = { id: string; client: string; sub: string; account: string | null; events: Event[]; closed: boolean };
+type Conversation = { id: string; client: string; sub: string; account: string | null; events: Event[]; handoff: 'none' | 'pending'; closed: boolean };
 const conversations = new Map<string, Conversation>();
-/** Accepted message IDs, per User: the content and the response, for retries (8.3). */
-const accepted = new Map<string, { content: string; status: number; body: unknown }>();
+/** Accepted request IDs, per User across all their requests (8.3): the path and body, and the response, for retries. */
+const accepted = new Map<string, { path: string; content: string; status: number; body: Record<string, unknown> }>();
 
 function addEvent(c: Conversation, e: Record<string, unknown>) {
   c.events.push({ id: `evt_${c.events.length + 1}`, created_at: new Date().toISOString(), type: 'message', ...e } as Event);
 }
-const state = (c: Conversation) => ({ status: c.closed ? 'closed' : 'idle', responder: 'agent' });
+/** A change to handoff, responder or closed adds a state event with all three (8.7). */
+const stateEvent = (c: Conversation) => addEvent(c, { type: 'state', handoff: c.handoff, responder: 'agent', closed: c.closed });
+/** The four state fields (8.7). The canned agent acts on a request as it accepts it, so working is false by the time anyone reads. */
+const state = (c: Conversation) => ({ working: false, handoff: c.handoff, responder: 'agent', closed: c.closed });
 function read(c: Conversation, cursor: string | null) {
   const from = cursor === null ? 0 : c.events.findIndex((e) => e.id === cursor) + 1;
   need(from > 0 || cursor === null, 'invalid_cursor', `Cursor ${cursor} isn't an event of this conversation.`);
   const events = c.events.slice(from);
   return { conversation_id: c.id, events, cursor: events.at(-1)?.id ?? cursor, has_more: false, ...state(c) };
 }
+const companyMessage = (asOf: string, text: string, extra: Record<string, unknown> = {}) =>
+  ({ message: { id: `msg_${randomBytes(6).toString('base64url')}`, role: 'company', author: { type: 'agent' }, as_of_request: asOf, text, ...extra } });
 
 /** The canned Company Agent: echoes; with the account scope, says which account and hands over a receipt. */
-async function companyReply(c: Conversation, text: unknown, s: Session, handle: string | null, scoped: boolean) {
+async function companyReply(c: Conversation, requestId: string, text: unknown, s: Session, handle: string | null, scoped: boolean) {
   const said = typeof text === 'string' ? `You said: "${text.slice(0, 200)}". ` : '';
   if (!scoped) {
-    addEvent(c, { message: { id: `msg_${randomBytes(6).toString('base64url')}`, role: 'company', author: { type: 'agent' }, text: `${said}I'm the proving ground's test Company Agent; I echo. Sign in with scope ${SCOPE} and send another message, and I'll tell you which account you used.` } });
+    addEvent(c, companyMessage(requestId, `${said}I'm the proving ground's test Company Agent; I echo. Sign in with scope ${SCOPE} and send another message, and I'll tell you which account you used.`));
     addEvent(c, { type: 'authorization', error: 'insufficient_scope', scope: SCOPE });
     return;
   }
-  const receipt = await new SignJWT({ door: 'poppy', spec: `Poppy 0.3 (${INFO.spec.pinned})`, resource: ENDPOINT, steps: LADDER.map((x) => x.name), proves: INFO.proves, issuer: ISSUER })
+  const receipt = await new SignJWT({ door: 'poppy', spec: `Poppy ${VERSION} (${INFO.spec.pinned})`, resource: ENDPOINT, steps: LADDER.map((x) => x.name), proves: INFO.proves, issuer: ISSUER })
     .setProtectedHeader({ alg: 'ES256', typ: 'pg-receipt+jwt', kid: verifier.kid })
     .setIssuer(DID)
     .setSubject(handle ?? 'anonymous')
     .setJti(s.attempt)
     .setIssuedAt()
     .sign(verifier.key);
-  addEvent(c, { message: { id: `msg_${randomBytes(6).toString('base64url')}`, role: 'company', author: { type: 'agent' }, text: `${said}You're signed in, to account ${c.account}. That's the door: here's your receipt.`, data: { receipt } } });
+  addEvent(c, companyMessage(requestId, `${said}You're signed in, to account ${c.account}. That's the door: here's your receipt.`, { data: { receipt } }));
 }
 
-/** A Poppy message (8.4), or a Stop. */
+/** A Poppy message (8.4), or a Stop. It has no id of its own: its ID is its request's. */
 function checkMessage(m: Record<string, unknown> | undefined) {
-  need(m && typeof m === 'object', 'invalid_request', 'The body needs a "message" object.');
-  need(typeof m.id === 'string' && ID.test(m.id), 'invalid_request', 'message.id must be 1 to 256 characters of A-Z a-z 0-9 - _.');
+  need(m && typeof m === 'object' && !Array.isArray(m), 'invalid_request', 'The body needs a "message" object.');
   const author = m.author as { type?: unknown } | undefined;
-  need(author?.type === 'agent' || author?.type === 'human', 'invalid_request', 'message.author.type must be "agent" or "human".');
+  // A type the Company doesn't recognize counts as agent (8.4), so any string will do.
+  need(typeof author?.type === 'string', 'invalid_request', 'message.author.type is required: "agent", or "human" for the User\'s own words (8.8).');
   need(['text', 'data', 'context', 'extensions'].some((k) => m[k] !== undefined), 'invalid_request', 'A message needs at least one of text, data, context or extensions.');
-  return m as { id: string; text?: unknown; data?: unknown };
+  return m as { text?: unknown; data?: unknown };
 }
 
 /** The intro for a request to the door's own URL, which isn't a Poppy endpoint. */
@@ -504,7 +526,7 @@ const intro = (): Reply => ({
   headers: {},
   body: {
     door: 'poppy',
-    message: 'This door is a Company under Personal Agent Protocol 0.3. Start with discovery; the conversation endpoint is in poppy.json.',
+    message: `This door is a Company under Personal Agent Protocol ${VERSION}. Start with discovery; the conversation endpoint is in poppy.json. Send Poppy-Version: ${VERSION} with every Session request.`,
     discovery: `${ORIGIN}/.well-known/poppy.json`,
     register: `POST {"handle": "<your-handle>", "client_id": "<your client metadata URL>"} to ${BASE_URL}/pg/runs. The door refuses Session JWTs from a client_id no run registered.`,
     spec: SPEC_URL,
@@ -515,7 +537,7 @@ const intro = (): Reply => ({
 
 // ---- The door ----
 
-const ROUTE = /^\/conversations(?:\/([^/]+)\/(messages|events|handoff|close))?$/;
+const ROUTE = /^\/conversations(?:\/([^/]+)\/(messages|events|handoff|handoff\/cancel|close))?$/;
 
 export async function serve(r: DoorRequest): Promise<Reply> {
   if (['/authorize', '/token', '/revoke'].includes(r.path)) return oauthEndpoint(r);
@@ -536,10 +558,12 @@ export async function serve(r: DoorRequest): Promise<Reply> {
   };
 
   try {
-    // session presented
+    // session presented, in a version this door serves (3.4)
     const jwt = r.headers['poppy-session'];
     need(typeof jwt === 'string' && jwt, 'no_session', 'Every request to a Poppy endpoint carries a Poppy-Session header (5.2).');
-    pass('session presented', 'Poppy-Session header present.');
+    const version = r.headers['poppy-version'];
+    need(typeof version === 'string' && /^1\.\d+$/.test(version.trim()), 'version_unsupported', `Every request with the Session header carries Poppy-Version, and this Company serves ${VERSION} (any 1.x); got ${JSON.stringify(version ?? null)}. Fetch poppy.json again and choose a version from it (3.4).`);
+    pass('session presented', `Poppy-Session header present, Poppy-Version ${version.trim()}.`);
 
     // client resolved: iss is a client_id some run registered; its metadata and keys check out
     const header = await guard('session_malformed', () => decodeProtectedHeader(jwt));
@@ -582,12 +606,11 @@ export async function serve(r: DoorRequest): Promise<Reply> {
     need(Math.abs(nowS() - (s.iat as number)) <= IAT_WINDOW_S, 'iat_out_of_window', `iat must be within ${IAT_WINDOW_S} seconds of now. Sign a fresh Session JWT for each request.`);
     const token = /^Bearer (.+)$/i.exec(String(r.headers.authorization ?? ''))?.[1];
     need(token ? s.ath === sha256(token) : s.ath === undefined, 'ath_mismatch', token ? 'ath must be the base64url SHA-256 of the access token sent.' : 'ath must be absent when no access token is sent.');
-    const key = `${clientId}|${s.sid}`;
+    const key = `${clientId}|${s.sid}|${s.sub}`;
     session = sessions.get(key);
-    need(!session || (session.sub === s.sub && session.agentId === s.agent_id), 'sub_mismatch', 'A Session keeps the same sub and agent_id in every Session JWT. Start a new sid for another User.');
     if (!session) {
       const attempt = store.newAttempt({ door: 'poppy', runId, nonce: null, nonceExpires: null, step: -1, timeline: [] });
-      session = { sub: s.sub as string, agentId: s.agent_id, account: null, attempt, step: -1, runId };
+      session = { sub: s.sub as string, account: null, attempt, step: -1, runId };
       sessions.set(key, session);
     }
     pass('session valid', `Session ${tail(s.sid as string)} for User ${tail(s.sub as string)}: signature, aud, htm/htu, iat and ath check out.`);
@@ -621,43 +644,60 @@ export async function serve(r: DoorRequest): Promise<Reply> {
 
     if (action === 'events') {
       body = read(conv!, cursor);
-    } else if (action === 'handoff' || action === 'close') {
-      const c = conv!;
-      need(!(action === 'handoff' && c.closed), 'conversation_closed', 'This conversation is closed.');
-      if (action === 'handoff') addEvent(c, { message: { id: `msg_${randomBytes(6).toString('base64url')}`, role: 'company', author: { type: 'agent' }, text: 'Nobody works at this door; a person will never join.' } });
-      else if (!c.closed) (c.closed = true), addEvent(c, { type: 'state', status: 'closed', responder: 'agent' });
-      status = action === 'handoff' ? 202 : 200;
-      body = state(c);
     } else {
-      // POST {endpoint}, or {endpoint}/{id}/messages
-      need(!conv?.closed, 'conversation_closed', 'This conversation is closed.');
+      // Every POST: a request ID, unique for the User across all their requests (8.3).
       const parsed = await guard('invalid_request', () => JSON.parse(r.body || '{}'));
-      need(!parsed.parent_conversation_id, 'invalid_request', 'This door offers no Direct Conversations.');
-      const msg = checkMessage(parsed.message);
-      const idKey = `${clientId}|${s.sub}|${msg.id}`;
-      const content = JSON.stringify(msg);
+      need(parsed && typeof parsed === 'object' && !Array.isArray(parsed), 'invalid_request', 'The body must be a JSON object.');
+      need(typeof parsed.id === 'string' && ID.test(parsed.id), 'invalid_request', 'Every POST has a top-level request id: 1 to 256 characters of A-Z a-z 0-9 - _ (8.3). A message has no id of its own.');
+      const idKey = `${clientId}|${s.sub}|${parsed.id}`;
+      const content = JSON.stringify(parsed);
       const before = accepted.get(idKey);
       if (before) {
-        need(before.content === content, 'message_id_conflict', `Message ID ${msg.id} was already accepted with different content.`);
-        log.push(entry(`Retry of message ${tail(msg.id)}: the original response again.`));
+        need(before.path === r.path && before.content === content, 'request_id_conflict', `Request ID ${parsed.id} was already accepted with a different ${before.path === r.path ? 'body' : 'path'} (8.3).`);
+        log.push(entry(`Retry of request ${tail(parsed.id)}: the original response again.`));
         status = before.status;
-        body = before.body as Record<string, unknown>;
+        body = before.body;
         conv = conversations.get(body.conversation_id as string);
       } else {
-        if (!conv) {
-          conv = { id: `cnv_${randomBytes(9).toString('base64url')}`, client: clientId, sub: s.sub as string, account: null, events: [], closed: false };
-          conversations.set(conv.id, conv);
+        if (action === 'handoff' || action === 'handoff/cancel' || action === 'close') {
+          const c = conv!;
+          need(action === 'close' || !c.closed, 'conversation_closed', 'This conversation is closed (8.12).');
+          if (action === 'handoff' && c.handoff === 'none') {
+            // Acted on at once: looking for a person, finding none, and saying so (8.9).
+            c.handoff = 'pending';
+            stateEvent(c);
+            c.handoff = 'none';
+            stateEvent(c);
+            addEvent(c, companyMessage(parsed.id, 'Nobody works at this door, so a person will never join. I can keep answering.'));
+          } else if (action === 'close' && !c.closed) {
+            c.closed = true;
+            c.handoff = 'none';
+            stateEvent(c);
+          }
+          // A cancel never finds handoff pending here, so it changes nothing (8.9).
+          status = 202;
+        } else {
+          // POST {endpoint}, or {endpoint}/{id}/messages
+          need(!conv?.closed, 'conversation_closed', 'This conversation is closed (8.12).');
+          need(!parsed.parent_conversation_id, 'invalid_request', 'This door offers no Direct Conversations.');
+          const msg = checkMessage(parsed.message);
+          if (!conv) {
+            conv = { id: `cnv_${randomBytes(9).toString('base64url')}`, client: clientId, sub: s.sub as string, account: null, events: [], handoff: 'none', closed: false };
+            conversations.set(conv.id, conv);
+          }
+          if (scoped) conv.account = session.account;
+          // The Company sets id and role, and ignores author.id, name and image on the agent's messages (8.4).
+          addEvent(conv, { message: { ...(parsed.message as object), id: parsed.id, role: 'user', author: { type: (parsed.message as { author: { type: string } }).author.type } } });
+          if (msg.text !== undefined || msg.data !== undefined) await companyReply(conv, parsed.id, msg.text, session, handle, scoped);
+          status = convId === undefined ? 201 : 202;
+          pass('conversation started', `Conversation ${tail(conv.id)} ${convId === undefined ? 'started' : 'continued'} with request ${tail(parsed.id)}.`);
+          if (scoped) pass('authorized call', `Signed-in message with scope ${SCOPE}: the conversation now uses account ${session.account}.`);
         }
-        if (scoped) conv.account = session.account;
-        addEvent(conv, { message: { ...msg, role: 'user' } });
-        if (msg.text !== undefined || msg.data !== undefined) await companyReply(conv, msg.text, session, handle, scoped);
-        status = convId === undefined ? 201 : 202;
-        body = { conversation_id: conv.id, ...state(conv) };
-        accepted.set(idKey, { content, status, body });
-        pass('conversation started', `Conversation ${tail(conv.id)} ${convId === undefined ? 'started' : 'continued'} with message ${tail(msg.id)}.`);
-        if (scoped) pass('authorized call', `Signed-in message with scope ${SCOPE}: the conversation now uses account ${session.account}.`);
+        // Accepted, not necessarily acted on: the response is only the conversation's ID (8.3).
+        body = { conversation_id: conv!.id };
+        accepted.set(idKey, { path: r.path, content, status, body });
       }
-      if (wait !== null) body = { ...read(conv!, cursor), ...state(conv!) };
+      if (wait !== null) body = read(conv!, cursor);
     }
 
     // reply read, through: what the read handed back

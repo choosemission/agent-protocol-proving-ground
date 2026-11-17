@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, jwtVerify, type JWK } from 'jose';
-import { call, companySaid, discover, message, newAgent, newSession, refresh, revoke, sessionJwt, signIn, tokenRequest, type Agent, type Company, type Session } from '../poppy-client.ts';
+import { call, companySaid, discover, message, newAgent, newSession, refresh, request, revoke, sessionJwt, signIn, tokenRequest, type Agent, type Company, type Session } from '../poppy-client.ts';
 
 // ---- The agents' own documents ----
 
@@ -72,11 +72,11 @@ const browser = (account = 'test-user', decision = 'allow') => async (url: strin
 /** Signs the agent in as `account`, and puts the access token on the Session. */
 const signedIn = async (s: Session, account = 'test-user') => (s.token = (await signIn(s.agent, company, 'conversations', browser(account))).access_token);
 
-/** A request with a hand-made Poppy-Session (or none), and extra headers. */
+/** A request with a hand-made Poppy-Session (or none), Poppy-Version 1.0 unless `headers` overrides it, and extra headers. */
 async function raw(url: string, o: { jwt?: string; method?: string; body?: unknown; headers?: Record<string, string> } = {}) {
   const res = await fetch(url, {
     method: o.method ?? 'POST',
-    headers: { ...(o.jwt !== undefined && { 'Poppy-Session': o.jwt }), 'content-type': 'application/json', ...o.headers },
+    headers: { ...(o.jwt !== undefined && { 'Poppy-Session': o.jwt }), 'Poppy-Version': '1.0', 'content-type': 'application/json', ...o.headers },
     body: o.method === 'GET' ? undefined : JSON.stringify(o.body ?? message('hi')),
   });
   return { status: res.status, headers: res.headers, body: await res.json() };
@@ -109,12 +109,14 @@ const state = async () => (await (await fetch(`${BASE}/pg/state`)).json()).doors
 
 test('discovery: poppy.json and the protected resource metadata', async () => {
   const doc = await (await fetch(`${ORIGIN}/.well-known/poppy.json`)).json();
-  assert.equal(doc.protocol_version, '0.3');
+  assert.equal(doc.protocol_version, '1.0');
   assert.equal(doc.organization.domain, `pg.localhost:${port}`);
   assert.equal(doc.auth.issuer, ISSUER);
   assert.deepEqual(doc.auth.scope_hints, { conversations: { changes: 'none', personal_data: false } });
-  assert.deepEqual(doc.agent.protocols, [{ type: 'poppy', endpoint: `${BASE}/pg/doors/poppy/conversations` }]);
-  assert.deepEqual(await (await fetch(`${ORIGIN}/.well-known/oauth-protected-resource`)).json(), { resource: ORIGIN, authorization_servers: [ISSUER] });
+  assert.equal(doc.agent.protocols.length, 1);
+  assert.deepEqual([doc.agent.protocols[0].type, doc.agent.protocols[0].endpoint], ['poppy', `${BASE}/pg/doors/poppy/conversations`]);
+  assert.match(doc.agent.protocols[0].description, /echoes/, 'a description is required in 1.0 (8.1)');
+  assert.deepEqual(await (await fetch(`${ORIGIN}/.well-known/oauth-protected-resource`)).json(), { resource: ORIGIN, authorization_servers: [ISSUER], scopes_supported: ['conversations'] });
   // The door is its own issuer: discover() has checked issuer and protected_resources (3.2).
   const as = company.as;
   assert.deepEqual([as.issuer, as.protected_resources], [ISSUER, [ORIGIN]]);
@@ -127,12 +129,19 @@ test('through: conversation signed out, sign-in at the issuer, signed-in reply w
   const { agent, run, session: s } = await newTeam();
   assert.equal(run.poppy.client_metadata, 'valid', JSON.stringify(run.poppy));
 
-  const started = await call(s, 'POST', company.endpoint, message('Hello'));
+  const hello = message('Hello');
+  const started = await call(s, 'POST', company.endpoint, hello);
   assert.equal(started.status, 201);
-  assert.equal(started.body.status, 'idle');
+  // Accepted, not acted on: only the conversation's ID (8.3).
+  assert.deepEqual(Object.keys(started.body), ['conversation_id']);
   const id = started.body.conversation_id;
   const read = await call(s, 'GET', `${company.endpoint}/${id}/events`);
   assert.equal(read.status, 200);
+  assert.deepEqual([read.body.working, read.body.handoff, read.body.responder, read.body.closed], [false, 'none', 'agent', false]);
+  const mine = read.body.events.find((e: { message?: { role: string } }) => e.message?.role === 'user').message;
+  // The message's ID is its request's (8.3).
+  assert.deepEqual([mine.id, mine.text], [hello.id, 'Hello']);
+  assert.equal(read.body.events.find((e: { message?: { role: string } }) => e.message?.role === 'company').message.as_of_request, mine.id);
   assert.match(companySaid(read.body)[0]!, /You said: "Hello"/);
   const ask = read.body.events.find((e: { type: string }) => e.type === 'authorization');
   assert.deepEqual([ask.error, ask.scope], ['insufficient_scope', 'conversations']);
@@ -156,12 +165,28 @@ test('through: conversation signed out, sign-in at the issuer, signed-in reply w
   for (const secret of [s.token, s.delegation, 'Signed in now']) assert.ok(!stored.includes(secret.slice(0, 30)), 'stored a secret or message text');
 });
 
-test('a retried message returns the original response', async () => {
+test('a retried request returns the original response, and starts nothing new', async () => {
   const { session: s } = await newTeam();
   const m = message('once');
   const first = await call(s, 'POST', company.endpoint, m);
   const again = await call(s, 'POST', company.endpoint, m);
-  assert.deepEqual(again.body, first.body);
+  assert.deepEqual([again.status, again.body], [first.status, first.body]);
+  const read = await call(s, 'GET', `${company.endpoint}/${first.body.conversation_id}/events`);
+  assert.equal(read.body.events.filter((e: { message?: { role: string } }) => e.message?.role === 'user').length, 1);
+});
+
+test('handoff: looking for a person, none found, said so; cancel changes nothing; close is 202 twice', async () => {
+  const { session: s } = await newTeam();
+  const id = (await call(s, 'POST', company.endpoint, message('hi'))).body.conversation_id;
+  const h = await call(s, 'POST', `${company.endpoint}/${id}/handoff?wait=0`, request());
+  assert.equal(h.status, 202);
+  const states = h.body.events.filter((e: { type: string }) => e.type === 'state').map((e: { handoff: string; responder: string; closed: boolean }) => [e.handoff, e.responder, e.closed]);
+  assert.deepEqual(states, [['pending', 'agent', false], ['none', 'agent', false]]);
+  assert.match(companySaid(h.body).at(-1)!, /a person will never join/);
+  assert.equal((await call(s, 'POST', `${company.endpoint}/${id}/handoff/cancel`, request())).status, 202);
+  const close = await call(s, 'POST', `${company.endpoint}/${id}/close?wait=0`, request());
+  assert.deepEqual([close.status, close.body.closed, close.body.working], [202, true, false]);
+  assert.equal((await call(s, 'POST', `${company.endpoint}/${id}/close`, request())).status, 202);
 });
 
 // ---- The door's authorization server ----
@@ -218,6 +243,35 @@ test('token: the client assertion is addressed to the issuer only, and PKCE is c
   assert.equal((await post(ISSUER)).body.error, 'invalid_grant');
 });
 
+test('token: an assertion over 5 minutes is refused; a resource other than the domain is invalid_target', async () => {
+  const { agent } = await newTeam();
+  const assertion = (life: number) => new SignJWT({}).setProtectedHeader({ alg: 'ES256', kid: agent.jwks.keys[0].kid })
+    .setIssuer(agent.clientId).setSubject(agent.clientId).setAudience(ISSUER).setIssuedAt().setExpirationTime(`${life}s`).setJti(crypto.randomUUID()).sign(agent.key);
+  const post = async (life: number, extra: Record<string, string> = {}) => {
+    const res = await fetch(company.as.token_endpoint, { method: 'POST', body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: 'none', client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: await assertion(life), ...extra }) });
+    return { status: res.status, body: await res.json() };
+  };
+  const long = await post(600);
+  assert.deepEqual([long.status, long.body.error], [401, 'invalid_client']);
+  assert.match(long.body.error_description, /at most 300 seconds/);
+  assert.equal((await post(300)).body.error, 'invalid_grant', 'five minutes exactly is allowed; the refresh token is what fails');
+  assert.equal((await post(120, { resource: 'https://elsewhere.example' })).body.error, 'invalid_target');
+  const t = await signIn(agent, company, 'conversations', browser());
+  assert.equal((await tokenRequest(agent, company, company.as.token_endpoint, { grant_type: 'refresh_token', refresh_token: t.refresh_token!, resource: ORIGIN })).token_type, 'Bearer');
+});
+
+test('authorize: no prompt=consent is noted on the timeline, not stopped', async () => {
+  const { name, agent, session: s } = await newTeam();
+  await call(s, 'POST', company.endpoint, message('hi'));
+  const consent = await fetch(authUrl(agent), { redirect: 'manual' });
+  assert.equal(consent.status, 200);
+  await call(s, 'POST', company.endpoint, message('again'));
+  const attempt = (await state()).recent.find((a: { handle: string }) => a.handle === name).id;
+  const detail = await (await fetch(`${BASE}/pg/attempts/${attempt}`)).json();
+  assert.ok(detail.timeline.some((e: { text: string }) => /note: no prompt=consent/.test(e.text)), JSON.stringify(detail.timeline));
+  assert.equal(detail.error, null);
+});
+
 test('refresh gives a new access token; revoking the refresh token ends both', async () => {
   const { agent, session: s } = await newTeam();
   const first = await signIn(agent, company, 'conversations', browser());
@@ -241,6 +295,15 @@ test('refresh gives a new access token; revoking the refresh token ends both', a
 
 test('no_session: no Poppy-Session header', async () => {
   stopped(await raw(company.endpoint), 400, 'invalid_session', 'no_session', 'session presented');
+});
+
+test('version_unsupported: no Poppy-Version, or 0.3; any 1.x is served as 1.0', async () => {
+  const { session: s } = await newTeam();
+  const jwt = () => sessionJwt(s, 'POST', company.endpoint);
+  const none = await fetch(company.endpoint, { method: 'POST', headers: { 'Poppy-Session': await jwt(), 'content-type': 'application/json' }, body: JSON.stringify(message('hi')) });
+  stopped({ status: none.status, body: await none.json() }, 400, 'version_unsupported', 'version_unsupported', 'session presented');
+  stopped(await raw(company.endpoint, { jwt: await jwt(), headers: { 'Poppy-Version': '0.3' } }), 400, 'version_unsupported', 'version_unsupported', 'session presented');
+  assert.equal((await raw(company.endpoint, { jwt: await jwt(), headers: { 'Poppy-Version': '1.1' } })).status, 201);
 });
 
 test('session_malformed: a header that is not a JWT', async () => {
@@ -314,22 +377,30 @@ test('ath_mismatch: ath with no access token', async () => {
   stopped(await raw(company.endpoint, { jwt: await sessionJwt(s, 'POST', company.endpoint, { ath: 'x' }) }), 400, 'invalid_session', 'ath_mismatch', 'session valid');
 });
 
-test('sub_mismatch: another User ID in a known Session', async () => {
+test('a known sid with another User ID is another Session, not an error (5.3)', async () => {
   const { session: s } = await newTeam();
-  assert.equal((await call(s, 'POST', company.endpoint, message('hi'))).status, 201);
-  stopped(await raw(company.endpoint, { jwt: await sessionJwt(s, 'POST', company.endpoint, { sub: 'someone-else' }) }), 400, 'invalid_session', 'sub_mismatch', 'session valid');
+  const first = await call(s, 'POST', company.endpoint, message('hi'));
+  assert.equal(first.status, 201);
+  const other = await raw(company.endpoint, { jwt: await sessionJwt(s, 'POST', company.endpoint, { sub: 'someone-else' }) });
+  assert.equal(other.status, 201, JSON.stringify(other.body));
+  // Its own conversation: the first User's isn't the second's.
+  stopped(await raw(`${company.endpoint}/${first.body.conversation_id}/events`, { method: 'GET', jwt: await sessionJwt(s, 'GET', `${company.endpoint}/${first.body.conversation_id}/events`, { sub: 'someone-else' }) }), 404, 'conversation_not_found', 'conversation_not_found', 'reply read');
 });
 
-test('invalid_request: a message with no content', async () => {
+test('invalid_request: a message with no content, and a POST with no request id', async () => {
   const { session: s } = await newTeam();
-  stopped(await call(s, 'POST', company.endpoint, { message: { id: 'm1', author: { type: 'agent' } } }), 400, 'invalid_request', 'invalid_request', 'conversation started');
+  stopped(await call(s, 'POST', company.endpoint, request({ message: { author: { type: 'agent' } } })), 400, 'invalid_request', 'invalid_request', 'conversation started');
+  const r = await call(s, 'POST', company.endpoint, { message: { id: 'm1', author: { type: 'agent' }, text: 'a 0.3 message' } });
+  stopped(r, 400, 'invalid_request', 'invalid_request', 'conversation started');
+  assert.match(r.body.error_description, /top-level request id/);
 });
 
-test('message_id_conflict: a message ID reused with other content', async () => {
+test('request_id_conflict: a request ID reused with another body, or on another path', async () => {
   const { session: s } = await newTeam();
   const m = message('first');
-  await call(s, 'POST', company.endpoint, m);
-  stopped(await call(s, 'POST', company.endpoint, { message: { ...m.message, text: 'second' } }), 409, 'message_id_conflict', 'message_id_conflict', 'conversation started');
+  const id = (await call(s, 'POST', company.endpoint, m)).body.conversation_id;
+  stopped(await call(s, 'POST', company.endpoint, { ...m, message: { ...m.message, text: 'second' } }), 409, 'request_id_conflict', 'request_id_conflict', 'conversation started');
+  stopped(await call(s, 'POST', `${company.endpoint}/${id}/messages`, m), 409, 'request_id_conflict', 'request_id_conflict', 'conversation started');
 });
 
 test('conversation_not_found: another User reads the conversation', async () => {
@@ -342,9 +413,9 @@ test('conversation_not_found: another User reads the conversation', async () => 
 test('conversation_closed: a message after close', async () => {
   const { session: s } = await newTeam();
   const id = (await call(s, 'POST', company.endpoint, message('hi'))).body.conversation_id;
-  const closed = await call(s, 'POST', `${company.endpoint}/${id}/close`, {});
-  assert.deepEqual([closed.status, closed.body.status], [200, 'closed']);
+  assert.equal((await call(s, 'POST', `${company.endpoint}/${id}/close`, request())).status, 202);
   stopped(await call(s, 'POST', `${company.endpoint}/${id}/messages`, message('still there?')), 409, 'conversation_closed', 'conversation_closed', 'reply read');
+  stopped(await call(s, 'POST', `${company.endpoint}/${id}/handoff/cancel`, request()), 409, 'conversation_closed', 'conversation_closed', 'reply read');
 });
 
 test('invalid_cursor: a cursor from nowhere', async () => {
@@ -405,5 +476,5 @@ test('the poppy wall, the door intro and the run response', async () => {
   const bad = await fetch(`${BASE}/pg/runs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ handle: 'bad-client', client_id: 'ftp://x' }) });
   assert.equal(bad.status, 400);
   const llms = await (await fetch(`${BASE}/llms.txt`)).text();
-  assert.ok(llms.includes('personal-agent-protocol@6fb46d3'));
+  assert.ok(llms.includes('personal-agent-protocol@8c02b42'));
 });
